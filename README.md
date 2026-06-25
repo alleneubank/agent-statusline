@@ -15,7 +15,7 @@ See [`SPEC.md`](SPEC.md) for the full contract (requirements, invariants, segmen
 
 ## Build
 
-Requires Zig (minimum `0.15.1`; built and tested on `0.16.0`). The project has no external dependencies.
+Requires Zig `0.16.0`+ (the renderer uses the 0.16 `std.Io` API). The project has no external dependencies.
 
 ```bash
 zig build                          # build -> zig-out/bin/statusline
