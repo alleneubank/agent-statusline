@@ -1,6 +1,6 @@
 # Statusline SPEC
 
-Retroactive specification for the Zig statusline renderer in `claude-code/statusline/`. Authored 2026-04-12 from the existing implementation in `src/main.zig` plus rl 1.0 alignment work.
+Retroactive specification for the Zig statusline renderer in this repo. Authored 2026-04-12 from the existing implementation in `src/main.zig` plus rl 1.0 alignment work.
 
 ## Problem
 
@@ -173,7 +173,7 @@ Historical context only. The statusline no longer parses this schema directly; `
 
 rl 1.0 alignment (first cut — 2026-04-12):
 
-- [x] `SPEC.md` exists colocated at `claude-code/statusline/SPEC.md`.
+- [x] `SPEC.md` exists colocated at the repo root.
 - [x] `CodexReviewState` struct, parse functions, and tests removed.
 - [x] `RalphState` gained `strategy`, `review_verdict`, `review_in_flight_job_id`, `best_metric_value`, `version`.
 - [x] `parseRalphStateFromContent` threads the allocator.

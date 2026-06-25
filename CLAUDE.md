@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for the Zig statusline project in `claude-code/statusline/`.
+Guidance for the standalone Zig statusline repo.
 
 ## Purpose
 
@@ -9,7 +9,7 @@ Build a fast single-line status renderer for Claude Code. Input comes from JSON 
 ## Build and Test
 
 ```bash
-# From claude-code/statusline
+# From the repo root
 zig build
 zig build run
 zig build run -- --debug
