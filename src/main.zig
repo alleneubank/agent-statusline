@@ -56,6 +56,7 @@ const StatuslineInput = struct {
         total_input_tokens: ?i64 = null,
         total_output_tokens: ?i64 = null,
         context_window_size: ?i64 = null,
+        used_percentage: ?f64 = null,
         /// Current context usage - added in v2.0.70
         /// Nested inside context_window, provides per-message token counts
         current_usage: ?CurrentUsage = null,
@@ -75,6 +76,7 @@ const ModelType = enum {
     sonnet,
     haiku,
     fable,
+    codex,
     unknown,
 
     fn fromName(name: []const u8) ModelType {
@@ -82,6 +84,8 @@ const ModelType = enum {
         if (std.mem.indexOf(u8, name, "Sonnet") != null) return .sonnet;
         if (std.mem.indexOf(u8, name, "Haiku") != null) return .haiku;
         if (std.mem.indexOf(u8, name, "Fable") != null) return .fable;
+        if (std.mem.indexOf(u8, name, "Codex") != null) return .codex;
+        if (std.mem.indexOf(u8, name, "GPT") != null or std.mem.indexOf(u8, name, "gpt") != null) return .codex;
         return .unknown;
     }
 
@@ -94,6 +98,7 @@ const ModelType = enum {
             .sonnet => "📜",
             .haiku => "🍃",
             .fable => "🦊",
+            .codex => "⌘",
             .unknown => "?",
         };
     }
@@ -271,6 +276,58 @@ fn readAllAlloc(allocator: Allocator, reader: *std.Io.Reader) ![]u8 {
     defer aw.deinit();
     _ = try reader.streamRemaining(&aw.writer);
     return aw.toOwnedSlice();
+}
+
+const default_debug_log_path: []const u8 = "/tmp/statusline-debug.log";
+
+fn envFlag(value: ?[]const u8) bool {
+    const v = value orelse return false;
+    return v.len > 0 and
+        !std.mem.eql(u8, v, "0") and
+        !std.mem.eql(u8, v, "false") and
+        !std.mem.eql(u8, v, "FALSE") and
+        !std.mem.eql(u8, v, "no") and
+        !std.mem.eql(u8, v, "NO");
+}
+
+fn debugLogPath(init: std.process.Init) ?[]const u8 {
+    if (init.environ_map.get("STATUSLINE_DEBUG_LOG")) |path| {
+        if (path.len > 0 and std.Io.Dir.path.isAbsolute(path)) return path;
+    }
+    return null;
+}
+
+fn appendDebug(io: std.Io, path: ?[]const u8, comptime fmt: []const u8, args: anytype) void {
+    const log_path = path orelse return;
+    const debug_file = std.Io.Dir.createFileAbsolute(io, log_path, .{ .truncate = false }) catch return;
+    defer debug_file.close(io);
+    var file_buffer: [1024]u8 = undefined;
+    var file_writer = debug_file.writer(io, &file_buffer);
+    const stat = debug_file.stat(io) catch null;
+    if (stat) |s| file_writer.seekTo(s.size) catch {};
+    const debug_writer = &file_writer.interface;
+    const timestamp = std.Io.Clock.real.now(io).toSeconds();
+    debug_writer.print("[{d}] ", .{timestamp}) catch return;
+    debug_writer.print(fmt, args) catch return;
+    debug_writer.print("\n", .{}) catch return;
+    debug_writer.flush() catch {};
+}
+
+fn writeCaptureFile(io: std.Io, dir: ?[]const u8, suffix: []const u8, content: []const u8) void {
+    const capture_dir = dir orelse return;
+    if (capture_dir.len == 0 or !std.Io.Dir.path.isAbsolute(capture_dir)) return;
+
+    var path_buf: [1024]u8 = undefined;
+    const timestamp = std.Io.Clock.real.now(io);
+    const path = std.fmt.bufPrint(&path_buf, "{s}/statusline-{d}.{s}", .{
+        capture_dir,
+        timestamp.nanoseconds,
+        suffix,
+    }) catch return;
+
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return;
+    defer file.close(io);
+    file.writeStreamingAll(io, content) catch {};
 }
 
 /// Execute a shell command and return trimmed output
@@ -1056,50 +1113,31 @@ pub fn main(init: std.process.Init) !void {
             debug_mode = true;
         }
     }
+    debug_mode = debug_mode or envFlag(init.environ_map.get("STATUSLINE_DEBUG"));
+    const env_debug_log_path = debugLogPath(init);
+    const debug_log_path = env_debug_log_path orelse if (debug_mode) default_debug_log_path else null;
+    const capture_dir = init.environ_map.get("STATUSLINE_CAPTURE_DIR");
 
     // Read and parse JSON input
     var stdin_buffer: [8192]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().readerStreaming(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
     const input_json = try readAllAlloc(allocator, stdin);
+    writeCaptureFile(io, capture_dir, "input.json", input_json);
 
     // Debug logging
-    if (debug_mode) {
-        const debug_file = std.Io.Dir.createFileAbsolute(io, "/tmp/statusline-debug.log", .{ .truncate = false }) catch null;
-        if (debug_file) |file| {
-            defer file.close(io);
-            const timestamp = std.Io.Clock.real.now(io).toSeconds();
-            var file_buffer: [1024]u8 = undefined;
-            var file_writer = file.writer(io, &file_buffer);
-            const stat = file.stat(io) catch null;
-            if (stat) |s| file_writer.seekTo(s.size) catch {};
-            const debug_writer = &file_writer.interface;
-            debug_writer.print("[{d}] Input JSON: {s}\n", .{ timestamp, input_json }) catch {};
-            debug_writer.flush() catch {};
-        }
-    }
+    appendDebug(io, debug_log_path, "Input JSON: {s}", .{input_json});
 
     const parsed = json.parseFromSlice(StatuslineInput, allocator, input_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        if (debug_mode) {
-            const debug_file = std.Io.Dir.createFileAbsolute(io, "/tmp/statusline-debug.log", .{ .truncate = false }) catch null;
-            if (debug_file) |file| {
-                defer file.close(io);
-                const timestamp = std.Io.Clock.real.now(io).toSeconds();
-                var file_buffer: [1024]u8 = undefined;
-                var file_writer = file.writer(io, &file_buffer);
-                const stat = file.stat(io) catch null;
-                if (stat) |s| file_writer.seekTo(s.size) catch {};
-                const debug_writer = &file_writer.interface;
-                debug_writer.print("[{d}] Parse error: {any}\n", .{ timestamp, err }) catch {};
-                debug_writer.flush() catch {};
-            }
-        }
+        appendDebug(io, debug_log_path, "Parse error: {any}", .{err});
         var stdout_buffer: [256]u8 = undefined;
         var stdout_writer_wrapper = std.Io.File.stdout().writer(io, &stdout_buffer);
         const stdout = &stdout_writer_wrapper.interface;
-        stdout.print("{s}~{s}\n", .{ colors.cyan, colors.reset }) catch {};
+        const fallback = colors.cyan ++ "~" ++ colors.reset;
+        writeCaptureFile(io, capture_dir, "output.ansi", fallback);
+        stdout.print("{s}\n", .{fallback}) catch {};
         stdout.flush() catch {};
         return;
     };
@@ -1191,6 +1229,9 @@ pub fn main(init: std.process.Init) !void {
             // Calculate context usage from current_usage (v2.0.70+) or fall back to transcript parsing
             const usage: ContextUsage = blk: {
                 if (input.context_window) |ctx| {
+                    if (ctx.used_percentage) |pct| {
+                        break :blk ContextUsage{ .percentage = @min(100.0, @max(0.0, pct)) };
+                    }
                     if (ctx.current_usage) |cur| {
                         // Use current_usage token counts directly (v2.0.70+)
                         const total_tokens = cur.totalTokens();
@@ -1251,20 +1292,8 @@ pub fn main(init: std.process.Init) !void {
     const output = writer.buffered();
 
     // Debug logging
-    if (debug_mode) {
-        const debug_file = std.Io.Dir.createFileAbsolute(io, "/tmp/statusline-debug.log", .{ .truncate = false }) catch null;
-        if (debug_file) |file| {
-            defer file.close(io);
-            const timestamp = std.Io.Clock.real.now(io).toSeconds();
-            var file_buffer: [1024]u8 = undefined;
-            var file_writer = file.writer(io, &file_buffer);
-            const stat = file.stat(io) catch null;
-            if (stat) |s| file_writer.seekTo(s.size) catch {};
-            const debug_writer = &file_writer.interface;
-            debug_writer.print("[{d}] Output: {s}\n", .{ timestamp, output }) catch {};
-            debug_writer.flush() catch {};
-        }
-    }
+    appendDebug(io, debug_log_path, "Output: {s}", .{output});
+    writeCaptureFile(io, capture_dir, "output.ansi", output);
 
     var stdout_buffer: [256]u8 = undefined;
     var stdout_writer_wrapper = std.Io.File.stdout().writer(io, &stdout_buffer);
@@ -1282,7 +1311,10 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.haiku, ModelType.fromName("Haiku"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable 5"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable"));
-    try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("GPT-4"));
+    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
+    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("GPT-5.5"));
+    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("gpt-5.5"));
+    try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
 test "ModelType emoji representations" {
@@ -1290,6 +1322,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("📜", ModelType.sonnet.emoji());
     try std.testing.expectEqualStrings("🍃", ModelType.haiku.emoji());
     try std.testing.expectEqualStrings("🦊", ModelType.fable.emoji());
+    try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 
@@ -1996,6 +2029,44 @@ test "JSON parsing with current_usage field (v2.0.70+)" {
     const effective_size = window_size * 0.775;
     const pct = (@as(f64, @floatFromInt(cur.totalTokens())) * 100.0) / effective_size;
     try std.testing.expectApproxEqAbs(@as(f64, 43.6), pct, 0.1);
+}
+
+test "JSON parsing with Codex used_percentage field" {
+    const allocator = std.testing.allocator;
+
+    const codex_json =
+        \\{
+        \\  "hook_event_name": "Status",
+        \\  "session_id": "codex-session",
+        \\  "model": {
+        \\    "id": "gpt-5.5",
+        \\    "display_name": "gpt-5.5 high"
+        \\  },
+        \\  "workspace": {
+        \\    "current_dir": "/Users/allen/0xbigboss/openai/codex-custom-statusline",
+        \\    "project_dir": "/Users/allen/0xbigboss/openai/codex-custom-statusline"
+        \\  },
+        \\  "context_window": {
+        \\    "context_window_size": 272000,
+        \\    "used_percentage": 52,
+        \\    "current_usage": {
+        \\      "input_tokens": 10,
+        \\      "output_tokens": 5,
+        \\      "cache_creation_input_tokens": 0,
+        \\      "cache_read_input_tokens": 0
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(StatuslineInput, allocator, codex_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(ModelType.codex, ModelType.fromName(parsed.value.model.?.display_name.?));
+    try std.testing.expectEqual(@as(f64, 52.0), parsed.value.context_window.?.used_percentage.?);
+    try std.testing.expectEqual(@as(i64, 15), parsed.value.context_window.?.current_usage.?.totalTokens());
 }
 
 test "current_usage field fallback when missing" {

@@ -105,7 +105,8 @@ Historical context only. The statusline no longer parses this schema directly; `
 
 - **REQ-SL-001**: The statusline reads one JSON `StatuslineInput` document from stdin. Fields are all optional. Unknown fields are ignored.
 - **REQ-SL-002**: If stdin JSON fails to parse, emit `~\n` (cyan) to stdout and exit 0. Log the parse error to `/tmp/statusline-debug.log` when `--debug` is set.
-- **REQ-SL-003**: `--debug` command-line flag enables writing the raw input, rendered output, and any diagnostics to `/tmp/statusline-debug.log` (append-only). No other command-line flags exist.
+- **REQ-SL-003**: `--debug` command-line flag or `STATUSLINE_DEBUG=1` enables writing the raw input, rendered output, and any diagnostics to `/tmp/statusline-debug.log` (append-only). `STATUSLINE_DEBUG_LOG=/absolute/path.log` overrides the debug log destination. No other command-line flags exist.
+- **REQ-SL-004**: `STATUSLINE_CAPTURE_DIR=/absolute/dir` enables live replay artifacts without changing visible output. For each render, the statusline writes `statusline-*.input.json` and `statusline-*.output.ansi` into the directory when possible. The directory must already exist; failures are swallowed per I-2.
 
 ### Workspace segment
 
@@ -164,8 +165,8 @@ Historical context only. The statusline no longer parses this schema directly; `
 - **REQ-SL-050**: A shell-prompt-style location prefix `{host}/{session}@` renders in front of the path. The short hostname is cyan (so the machine is unmistakable); the `/{session}` and the `@` joiner are gray. The path follows in cyan. The prefix is omitted entirely only when there is neither a host nor a session.
 - **REQ-SL-055**: The short hostname comes from the `gethostname(2)` syscall (no subprocess), truncated at the first dot (drops `.local` and DNS domains). On syscall failure the host token is skipped (prefix degrades to `{session}@`).
 - **REQ-SL-056**: `{session}` is `ZMX_SESSION` (when non-empty) after `dedupeZmxSession` strips a leading/trailing worktree-leaf occurrence, capped at `max_zmx_display` (overflow truncates with `…`). When the session collapses to empty (it was just the leaf), the prefix is `{host}@` with no `/`. When the host is empty, the session renders without a leading `/`.
-- **REQ-SL-051**: Model segment (`{gauge} {emoji}`) is emitted when `input.model.display_name` is present.
-- **REQ-SL-052**: Context usage prefers `context_window.current_usage` (v2.0.70+). Falls back to parsing the transcript's last assistant message (max 100 lines / 512 KiB tail scan). Effective context size is 77.5% of `context_window_size` (22.5% autocompact reserve). Returns 0% when unavailable.
+- **REQ-SL-051**: Model segment (`{gauge} {emoji}`) is emitted when `input.model.display_name` is present. Claude models render with their Claude glyphs; Codex/GPT display names render with `⌘`; unknown models render `?`.
+- **REQ-SL-052**: Context usage prefers `context_window.used_percentage` when present (Codex payloads already calculate the authoritative statusline percentage). Otherwise it uses `context_window.current_usage` (Claude Code v2.0.70+). Falls back to parsing the transcript's last assistant message (max 100 lines / 512 KiB tail scan). Effective context size is 77.5% of `context_window_size` (22.5% autocompact reserve) when calculating from tokens. Returns 0% when unavailable.
 - **REQ-SL-053**: Cost (`${usd}`), duration (`Nh|Nm|<1m`), and lines-changed (`+N/-N` in green/red) render when their source fields are present and non-zero. Rounding rules: `<$1 .2f`, `<$10 .1f`, `≥$10 integer`.
 - **REQ-SL-054**: Idle-since indicator (`💤{time}`) reads `~/.claude/.idle-since-{session_id}` (max 32 bytes) and is only shown when the file exists.
 
