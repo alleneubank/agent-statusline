@@ -1,10 +1,10 @@
-# claude-statusline
+# agent-statusline
 
-A fast, single-line status renderer for [Claude Code](https://github.com/anthropics/claude-code), written in Zig. It reads Claude Code's `StatuslineInput` JSON on stdin and prints one formatted status line on stdout.
+A fast, single-line status renderer for command-backed agent statusline payloads, written in Zig. It reads one JSON snapshot on stdin and prints one formatted status line on stdout.
 
 ## Behavior
 
-- Reads `StatuslineInput` JSON from stdin and ignores unknown fields.
+- Reads statusline JSON from stdin and ignores unknown fields.
 - Crash-free by design: any error in a segment degrades to hiding that segment, falling back to `~` in the worst case. A return code of `0` is always produced.
 - Empty segments emit zero bytes (no stray separators).
 - Renders host/working-directory and git segments from the current workspace, plus an rl loop segment.
@@ -15,8 +15,8 @@ A fast, single-line status renderer for [Claude Code](https://github.com/anthrop
   without changing visible output.
 - `STATUSLINE_CAPTURE_DIR=/absolute/dir` writes replay artifacts for every render:
   `statusline-*.input.json` and `statusline-*.output.ansi`.
-- Codex status payloads are supported: GPT/Codex models render with `⌘`, and
-  `context_window.used_percentage` is preferred when present.
+- Claude Code and Codex-style status payloads are supported. Claude models render with their existing glyphs; recommended Codex models render with model-specific glyphs (`gpt-5.5` 🧠, `gpt-5.4` 🔧, `gpt-5.4-mini` ⚡, `gpt-5.3-codex-spark` ✨), with `⌘` as the generic GPT/Codex fallback.
+- Session event display is renderer-owned: the statusline stores a per-session fingerprint/timestamp under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
 
 See [`SPEC.md`](SPEC.md) for the full contract (requirements, invariants, segment rules).
 
@@ -53,6 +53,18 @@ Build a release binary and point your Claude Code `statusLine` setting at it (`~
 ```
 
 Claude Code pipes the status JSON to the command on stdin and renders its stdout.
+
+## Use with Codex
+
+With a Codex build that supports command-backed custom status lines, configure the renderer as the command:
+
+```toml
+[tui.custom_status_line]
+type = "command"
+command = "/absolute/path/to/zig-out/bin/statusline"
+```
+
+Codex pipes a JSON snapshot to the command on stdin. Empty, failing, or timed-out renderer output is hidden by Codex.
 
 ## Debug capture
 

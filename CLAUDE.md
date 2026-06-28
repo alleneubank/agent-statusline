@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-Guidance for the standalone Zig statusline repo.
+Guidance for the standalone Zig agent-statusline repo.
 
 ## Purpose
 
-Build a fast single-line status renderer for Claude Code. Input comes from JSON on stdin; output is one formatted status line on stdout.
+Build a fast single-line status renderer for command-backed agent statusline payloads. Input comes from JSON on stdin; output is one formatted status line on stdout.
 
 ## Build and Test
 
@@ -21,7 +21,7 @@ zig build -Doptimize=ReleaseFast
 
 ## Runtime Contract
 
-- Reads `StatuslineInput` JSON from stdin.
+- Reads statusline JSON from stdin.
 - Ignores unknown JSON fields (`ignore_unknown_fields = true`).
 - On parse failure, prints minimal fallback (`~`) instead of crashing.
 - Optional debug mode appends diagnostics to `/tmp/statusline-debug.log`.
@@ -30,6 +30,7 @@ zig build -Doptimize=ReleaseFast
 
 - Git metadata is read from the current workspace directory.
 - Review/loop state is rendered by `rl statusline` (PATH dependency); the statusline does not read `.rl/state.json` directly.
+- Session event time is tracked by this renderer in neutral per-session state; producers do not write sidecar files.
 
 ## Guardrails
 

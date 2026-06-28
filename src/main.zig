@@ -6,6 +6,20 @@
 const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
+const c = @cImport({
+    @cInclude("time.h");
+});
+
+fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
 
 /// ANSI color codes as a namespace
 const colors = struct {
@@ -22,8 +36,8 @@ const colors = struct {
     const bg_reset = "\x1b[49m"; // Reset background only
 };
 
-/// Current context usage token counts - added in v2.0.70
-/// Provides accurate per-message token counts for context window calculation
+/// Current context usage token counts.
+/// Provides accurate per-message token counts for context window calculation.
 const CurrentUsage = struct {
     input_tokens: ?i64 = null,
     output_tokens: ?i64 = null,
@@ -39,7 +53,7 @@ const CurrentUsage = struct {
     }
 };
 
-/// Input structure from Claude Code (matches latest API)
+/// Input structure from supported agent statusline producers.
 const StatuslineInput = struct {
     workspace: ?struct {
         current_dir: ?[]const u8 = null,
@@ -57,8 +71,7 @@ const StatuslineInput = struct {
         total_output_tokens: ?i64 = null,
         context_window_size: ?i64 = null,
         used_percentage: ?f64 = null,
-        /// Current context usage - added in v2.0.70
-        /// Nested inside context_window, provides per-message token counts
+        /// Nested inside context_window, provides per-message token counts.
         current_usage: ?CurrentUsage = null,
     } = null,
     cost: ?struct {
@@ -76,16 +89,24 @@ const ModelType = enum {
     sonnet,
     haiku,
     fable,
+    gpt55,
+    gpt54,
+    gpt54_mini,
+    gpt53_codex_spark,
     codex,
     unknown,
 
     fn fromName(name: []const u8) ModelType {
-        if (std.mem.indexOf(u8, name, "Opus") != null) return .opus;
-        if (std.mem.indexOf(u8, name, "Sonnet") != null) return .sonnet;
-        if (std.mem.indexOf(u8, name, "Haiku") != null) return .haiku;
-        if (std.mem.indexOf(u8, name, "Fable") != null) return .fable;
-        if (std.mem.indexOf(u8, name, "Codex") != null) return .codex;
-        if (std.mem.indexOf(u8, name, "GPT") != null or std.mem.indexOf(u8, name, "gpt") != null) return .codex;
+        if (asciiContainsIgnoreCase(name, "Opus")) return .opus;
+        if (asciiContainsIgnoreCase(name, "Sonnet")) return .sonnet;
+        if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
+        if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
+        if (asciiContainsIgnoreCase(name, "gpt-5.3-codex-spark")) return .gpt53_codex_spark;
+        if (asciiContainsIgnoreCase(name, "gpt-5.4-mini")) return .gpt54_mini;
+        if (asciiContainsIgnoreCase(name, "gpt-5.5")) return .gpt55;
+        if (asciiContainsIgnoreCase(name, "gpt-5.4")) return .gpt54;
+        if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
+        if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
     }
 
@@ -98,6 +119,10 @@ const ModelType = enum {
             .sonnet => "📜",
             .haiku => "🍃",
             .fable => "🦊",
+            .gpt55 => "🧠",
+            .gpt54 => "🔧",
+            .gpt54_mini => "⚡",
+            .gpt53_codex_spark => "✨",
             .codex => "⌘",
             .unknown => "?",
         };
@@ -528,30 +553,166 @@ fn formatLinesChanged(input: StatuslineInput, writer: anytype) !bool {
     return true;
 }
 
-/// Read idle-since file for this session and write the indicator directly.
-/// Reads and formats in one call to avoid returning a dangling stack slice.
-/// Returns true if indicator was written, false if not idle or file missing.
-fn formatIdleSince(writer: anytype, io: std.Io, home: []const u8, session_id: ?[]const u8) !bool {
-    const sid = session_id orelse return false;
-    if (sid.len == 0) return false;
-    if (home.len == 0) return false;
-    var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/.claude/.idle-since-{s}", .{ home, sid }) catch return false;
+const state_app_dir = "agent-statusline";
 
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+const SessionEventState = struct {
+    fingerprint: u64,
+    label: [11]u8,
+};
+
+fn resolveStateDir(allocator: Allocator, override_dir: ?[]const u8, xdg_state_home: ?[]const u8, home: []const u8) ?[]const u8 {
+    if (override_dir) |dir| {
+        if (dir.len > 0 and std.Io.Dir.path.isAbsolute(dir)) return dir;
+    }
+    if (xdg_state_home) |dir| {
+        if (dir.len > 0 and std.Io.Dir.path.isAbsolute(dir)) {
+            return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, state_app_dir }) catch null;
+        }
+    }
+    if (home.len > 0) {
+        return std.fmt.allocPrint(allocator, "{s}/.local/state/{s}", .{ home, state_app_dir }) catch null;
+    }
+    return null;
+}
+
+fn sessionIdentity(input: StatuslineInput) []const u8 {
+    if (input.session_id) |sid| {
+        if (sid.len > 0) return sid;
+    }
+    if (input.workspace) |workspace| {
+        if (workspace.current_dir) |dir| {
+            if (dir.len > 0) return dir;
+        }
+    }
+    if (input.model) |model| {
+        if (model.display_name) |name| {
+            if (name.len > 0) return name;
+        }
+    }
+    return "global";
+}
+
+fn sessionStatePath(allocator: Allocator, state_dir: []const u8, input: StatuslineInput) ![]const u8 {
+    const key_hash = std.hash.Wyhash.hash(0, sessionIdentity(input));
+    return std.fmt.allocPrint(allocator, "{s}/{x}.state", .{ state_dir, key_hash });
+}
+
+fn isDigit(byte: u8) bool {
+    return byte >= '0' and byte <= '9';
+}
+
+fn isEventTimeLabel(label: []const u8) bool {
+    return label.len == 11 and
+        isDigit(label[0]) and
+        isDigit(label[1]) and
+        label[2] == '/' and
+        isDigit(label[3]) and
+        isDigit(label[4]) and
+        label[5] == ' ' and
+        isDigit(label[6]) and
+        isDigit(label[7]) and
+        label[8] == ':' and
+        isDigit(label[9]) and
+        isDigit(label[10]);
+}
+
+fn formatUtcEventTime(seconds: i64) [11]u8 {
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(seconds, 0)) };
+    const day_seconds = epoch_seconds.getDaySeconds();
+    const month_day = epoch_seconds.getEpochDay().calculateYearDay().calculateMonthDay();
+    var label: [11]u8 = undefined;
+    var scratch: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&scratch, "{d:0>2}/{d:0>2} {d:0>2}:{d:0>2}", .{
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+    }) catch "01/01 00:00";
+    @memcpy(label[0..], text[0..11]);
+    return label;
+}
+
+fn formatLocalEventTime(seconds: i64) [11]u8 {
+    var raw_seconds: c.time_t = @intCast(seconds);
+    var local: c.struct_tm = undefined;
+    if (c.localtime_r(&raw_seconds, &local) == null) return formatUtcEventTime(seconds);
+
+    var label: [11]u8 = undefined;
+    var scratch: [12]u8 = undefined;
+    const written = c.strftime(&scratch, scratch.len, "%m/%d %H:%M", &local);
+    if (written != 11 or !isEventTimeLabel(scratch[0..11])) return formatUtcEventTime(seconds);
+    @memcpy(label[0..], scratch[0..11]);
+    return label;
+}
+
+fn currentUnixSeconds() i64 {
+    const now = c.time(null);
+    if (now < 0) return 0;
+    return @intCast(now);
+}
+
+fn parseSessionEventState(content: []const u8) ?SessionEventState {
+    var parts = std.mem.tokenizeAny(u8, content, " \t\n\r");
+    const fingerprint_text = parts.next() orelse return null;
+    const label_text = std.mem.trim(u8, content[fingerprint_text.len..], " \t\n\r");
+    if (!isEventTimeLabel(label_text)) return null;
+
+    const fingerprint = std.fmt.parseInt(u64, fingerprint_text, 16) catch return null;
+    var label: [11]u8 = undefined;
+    @memcpy(&label, label_text[0..11]);
+    return .{ .fingerprint = fingerprint, .label = label };
+}
+
+fn readSessionEventState(allocator: Allocator, io: std.Io, path: []const u8) ?SessionEventState {
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
 
-    // File contains a short time string like "14:45\n"
-    var buf: [32]u8 = undefined;
-    var file_reader_buf: [32]u8 = undefined;
-    var file_reader = file.readerStreaming(io, &file_reader_buf);
-    const bytes_read = file_reader.interface.readSliceShort(&buf) catch return false;
-    if (bytes_read == 0) return false;
+    var file_buffer: [128]u8 = undefined;
+    var file_reader = file.readerStreaming(io, &file_buffer);
+    const content = readAllAlloc(allocator, &file_reader.interface) catch return null;
+    defer allocator.free(content);
 
-    const trimmed = std.mem.trim(u8, buf[0..bytes_read], " \t\n\r");
-    if (trimmed.len == 0) return false;
+    return parseSessionEventState(content);
+}
 
-    try writer.print(" 💤{s}{s}{s}", .{ colors.light_gray, trimmed, colors.reset });
+fn writeSessionEventState(io: std.Io, path: []const u8, state: SessionEventState) void {
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return;
+    defer file.close(io);
+    var file_buffer: [128]u8 = undefined;
+    var file_writer = file.writer(io, &file_buffer);
+    const writer = &file_writer.interface;
+    writer.print("{x} {s}\n", .{ state.fingerprint, state.label }) catch return;
+    writer.flush() catch {};
+}
+
+fn updateSessionEventState(
+    allocator: Allocator,
+    io: std.Io,
+    state_dir: ?[]const u8,
+    input: StatuslineInput,
+    input_json: []const u8,
+    now_seconds: i64,
+) ?SessionEventState {
+    const dir = state_dir orelse return null;
+    const path = sessionStatePath(allocator, dir, input) catch return null;
+    std.Io.Dir.cwd().createDirPath(io, dir) catch return readSessionEventState(allocator, io, path);
+
+    const fingerprint = std.hash.Wyhash.hash(0, input_json);
+    if (readSessionEventState(allocator, io, path)) |previous| {
+        if (previous.fingerprint == fingerprint) return previous;
+    }
+
+    const next = SessionEventState{
+        .fingerprint = fingerprint,
+        .label = formatLocalEventTime(now_seconds),
+    };
+    writeSessionEventState(io, path, next);
+    return next;
+}
+
+fn formatSessionEventTime(writer: anytype, state: ?SessionEventState) !bool {
+    const s = state orelse return false;
+    try writer.print(" 💤{s}{s}{s}", .{ colors.light_gray, s.label, colors.reset });
     return true;
 }
 
@@ -1117,6 +1278,12 @@ pub fn main(init: std.process.Init) !void {
     const env_debug_log_path = debugLogPath(init);
     const debug_log_path = env_debug_log_path orelse if (debug_mode) default_debug_log_path else null;
     const capture_dir = init.environ_map.get("STATUSLINE_CAPTURE_DIR");
+    const state_dir = resolveStateDir(
+        allocator,
+        init.environ_map.get("STATUSLINE_STATE_DIR"),
+        init.environ_map.get("XDG_STATE_HOME"),
+        home,
+    );
 
     // Read and parse JSON input
     var stdin_buffer: [8192]u8 = undefined;
@@ -1143,6 +1310,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const input = parsed.value;
+    const now_seconds = currentUnixSeconds();
+    const session_event_state = updateSessionEventState(allocator, io, state_dir, input, input_json, now_seconds);
 
     // Use a single buffer for the entire output
     var output_buf: [1024]u8 = undefined;
@@ -1226,14 +1395,14 @@ pub fn main(init: std.process.Init) !void {
         if (model.display_name) |name| {
             const model_type = ModelType.fromName(name);
 
-            // Calculate context usage from current_usage (v2.0.70+) or fall back to transcript parsing
+            // Calculate context usage from producer-provided fields or fall back to transcript parsing.
             const usage: ContextUsage = blk: {
                 if (input.context_window) |ctx| {
                     if (ctx.used_percentage) |pct| {
                         break :blk ContextUsage{ .percentage = @min(100.0, @max(0.0, pct)) };
                     }
                     if (ctx.current_usage) |cur| {
-                        // Use current_usage token counts directly (v2.0.70+)
+                        // Use current_usage token counts directly.
                         const total_tokens = cur.totalTokens();
                         const window_size: f64 = @floatFromInt(ctx.context_window_size orelse 200000);
                         // Effective context is 77.5% of window (22.5% reserved for autocompact buffer)
@@ -1242,7 +1411,8 @@ pub fn main(init: std.process.Init) !void {
                         break :blk ContextUsage{ .percentage = pct, .total_tokens = @intCast(total_tokens) };
                     }
                 }
-                // Fall back to transcript parsing for older Claude Code versions
+                // Fall back to transcript parsing for producers that do not send
+                // an authoritative percentage or current token usage.
                 const context_size = if (input.context_window) |ctx| ctx.context_window_size else null;
                 break :blk try calculateContextUsage(allocator, io, input.transcript_path, context_size);
             };
@@ -1285,8 +1455,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Idle-since indicator (visible only when agent is waiting for input)
-    _ = try formatIdleSince(&writer, io, home, input.session_id);
+    // Last observed session event. The renderer owns this neutral state so
+    // producers do not need to write sidecar files or grow a timestamp field.
+    _ = try formatSessionEventTime(&writer, session_event_state);
 
     // Output the complete statusline at once
     const output = writer.buffered();
@@ -1312,8 +1483,12 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable 5"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable"));
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
-    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("GPT-5.5"));
-    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("gpt-5.5"));
+    try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName("GPT-5.5"));
+    try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName("gpt-5.5 high"));
+    try std.testing.expectEqual(ModelType.gpt54, ModelType.fromName("gpt-5.4"));
+    try std.testing.expectEqual(ModelType.gpt54_mini, ModelType.fromName("gpt-5.4-mini"));
+    try std.testing.expectEqual(ModelType.gpt53_codex_spark, ModelType.fromName("gpt-5.3-codex-spark"));
+    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("gpt-5.3-codex"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -1322,6 +1497,10 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("📜", ModelType.sonnet.emoji());
     try std.testing.expectEqualStrings("🍃", ModelType.haiku.emoji());
     try std.testing.expectEqualStrings("🦊", ModelType.fable.emoji());
+    try std.testing.expectEqualStrings("🧠", ModelType.gpt55.emoji());
+    try std.testing.expectEqualStrings("🔧", ModelType.gpt54.emoji());
+    try std.testing.expectEqualStrings("⚡", ModelType.gpt54_mini.emoji());
+    try std.testing.expectEqualStrings("✨", ModelType.gpt53_codex_spark.emoji());
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
@@ -1796,7 +1975,7 @@ test "writeLocationPrefix" {
 }
 
 test "calculateContextUsageFromApi with API values" {
-    // NOTE: This function exists but is currently unused due to bug in Claude Code API
+    // Keep the token-derived fallback covered even when producers provide a direct percentage.
     // See: https://github.com/anthropics/claude-code/issues/13783
     // Effective context = 200000 * 0.775 = 155000
     // Test with 50% usage: 77500 % 155000 = 77500, 77500/155000 = 50%
@@ -1979,7 +2158,7 @@ test "JSON parsing with full API structure" {
     try std.testing.expectEqual(@as(i64, 23), parsed.value.cost.?.total_lines_removed.?);
 }
 
-test "JSON parsing with current_usage field (v2.0.70+)" {
+test "JSON parsing with current_usage field" {
     const allocator = std.testing.allocator;
 
     const json_with_usage =
@@ -2064,7 +2243,7 @@ test "JSON parsing with Codex used_percentage field" {
     });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(ModelType.codex, ModelType.fromName(parsed.value.model.?.display_name.?));
+    try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName(parsed.value.model.?.display_name.?));
     try std.testing.expectEqual(@as(f64, 52.0), parsed.value.context_window.?.used_percentage.?);
     try std.testing.expectEqual(@as(i64, 15), parsed.value.context_window.?.current_usage.?.totalTokens());
 }
@@ -2072,7 +2251,7 @@ test "JSON parsing with Codex used_percentage field" {
 test "current_usage field fallback when missing" {
     const allocator = std.testing.allocator;
 
-    // JSON without current_usage (older Claude Code versions)
+    // JSON without current_usage (older or smaller producer payloads)
     const json_without_usage =
         \\{
         \\  "model": {
@@ -2098,25 +2277,44 @@ test "current_usage field fallback when missing" {
     try std.testing.expect(parsed.value.context_window.?.current_usage == null);
 }
 
-test "formatIdleSince returns false without session_id" {
-    var buf: [128]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buf);
+test "resolveStateDir uses neutral statusline-owned paths" {
+    const allocator = std.testing.allocator;
 
-    const result_null = try formatIdleSince(&writer, std.testing.io, "", null);
-    try std.testing.expect(!result_null);
-    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    try std.testing.expectEqualStrings(
+        "/tmp/statusline-state",
+        resolveStateDir(allocator, "/tmp/statusline-state", "/tmp/xdg-state", "/home/test").?,
+    );
 
-    const result_empty = try formatIdleSince(&writer, std.testing.io, "", "");
-    try std.testing.expect(!result_empty);
-    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    const xdg = resolveStateDir(allocator, null, "/tmp/xdg-state", "/home/test").?;
+    defer allocator.free(xdg);
+    try std.testing.expectEqualStrings("/tmp/xdg-state/" ++ state_app_dir, xdg);
+
+    const home = resolveStateDir(allocator, null, null, "/home/test").?;
+    defer allocator.free(home);
+    try std.testing.expectEqualStrings("/home/test/.local/state/" ++ state_app_dir, home);
 }
 
-test "formatIdleSince returns false for missing file" {
+test "parseSessionEventState parses fingerprint and label" {
+    const parsed = parseSessionEventState("2a 06/28 15:24\n").?;
+    try std.testing.expectEqual(@as(u64, 0x2a), parsed.fingerprint);
+    try std.testing.expectEqualStrings("06/28 15:24", &parsed.label);
+    try std.testing.expect(parseSessionEventState("2a bad\n") == null);
+}
+
+test "formatUtcEventTime formats date and time" {
+    try std.testing.expectEqualStrings("01/01 00:00", &formatUtcEventTime(0));
+    try std.testing.expectEqualStrings("01/01 01:05", &formatUtcEventTime((60 * 60) + (5 * 60)));
+    try std.testing.expectEqualStrings("01/01 23:59", &formatUtcEventTime((23 * 60 * 60) + (59 * 60)));
+}
+
+test "formatSessionEventTime renders stored timestamp" {
     var buf: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
 
-    // Nonexistent session ID -> file won't exist -> returns false
-    const result = try formatIdleSince(&writer, std.testing.io, "", "nonexistent-session-id-12345");
-    try std.testing.expect(!result);
-    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    const result = try formatSessionEventTime(&writer, SessionEventState{
+        .fingerprint = 1,
+        .label = "06/28 15:24".*,
+    });
+    try std.testing.expect(result);
+    try std.testing.expectEqualStrings(" 💤" ++ colors.light_gray ++ "06/28 15:24" ++ colors.reset, writer.buffered());
 }
