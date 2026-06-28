@@ -1,0 +1,20 @@
+{
+  "name": "agent-statusline",
+  "description": "Hook-backed activity tracking for the agent-statusline renderer across Claude Code and Codex CLI.",
+  "author": {
+    "name": "Allen Eubank",
+    "email": "bigboss@metalrodeo.xyz",
+    "url": "https://github.com/0xbigboss/agent-statusline"
+  },
+  "repository": "https://github.com/0xbigboss/agent-statusline",
+  "version": "0.2.0",
+  "skills": "./skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "statusline",
+    "codex",
+    "claude",
+    "hooks",
+    "activity"
+  ]
+}

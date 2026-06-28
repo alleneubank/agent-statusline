@@ -1,0 +1,30 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-statusline",
+  "description": "Shared statusline activity hooks for Claude Code.",
+  "owner": {
+    "name": "Allen Eubank",
+    "email": "bigboss@metalrodeo.xyz"
+  },
+  "plugins": [
+    {
+      "name": "agent-statusline",
+      "description": "Tracks prompt and idle transitions for the Zig agent-statusline renderer.",
+      "source": "./plugins/agent-statusline",
+      "version": "0.2.0",
+      "category": "developer-tools",
+      "author": {
+        "name": "Allen Eubank",
+        "email": "bigboss@metalrodeo.xyz"
+      },
+      "homepage": "https://github.com/0xbigboss/agent-statusline",
+      "keywords": [
+        "statusline",
+        "hooks",
+        "activity",
+        "codex",
+        "claude"
+      ]
+    }
+  ]
+}

@@ -41,7 +41,7 @@ stdin (JSON StatuslineInput)
 │  path + branch + git-status                          │
 │  rl loop segment       (from `rl statusline`)        │
 │  model + gauge + usage + cost + duration + lines     │
-│  session-event time    (renderer-owned neutral state)       │
+│  activity time         (hook-owned neutral state)            │
 └──────┬───────────────────────────────────────────────┘
        │
        ▼
@@ -51,7 +51,7 @@ stdin (JSON StatuslineInput)
 ### Key types (source: `src/main.zig`)
 
 - `StatuslineInput` — the stdin contract for supported producers. Fields are all optional. `context_window.used_percentage` is the preferred context source when present; `context_window.current_usage` and transcript parsing are fallbacks.
-- `SessionEventState` — renderer-owned per-session state containing the last input fingerprint and `MM/DD HH:MM` display timestamp. It lets the renderer show the last observed session event without requiring producer-specific sidecar files or payload timestamp fields.
+- `ActivityState` — hook-owned per-session state containing `working` / `idle`, `last_prompt_at`, `idle_since`, and `updated_at`. It lets the renderer show prompt and idle transitions without requiring producer statusline payload changes.
 - `ContextUsage` — `{ percentage, total_tokens }`. Renders a 5-char, 40-step eighth-block gauge with an RGB gradient (green → yellow → red).
 - `ModelType` — `opus | sonnet | haiku | fable | gpt55 | gpt54 | gpt54_mini | gpt53_codex_spark | codex | unknown`. Drives the model glyph (`🎭📜🍃🦊🧠🔧⚡✨⌘?`).
 - `GitStatus` — `{ added, modified, deleted, untracked }`. Parsed from `git status --porcelain`.
@@ -95,7 +95,7 @@ Historical context only. The statusline no longer parses this schema directly; `
 - **I-1 Single-line output.** Exactly one newline, at the end. No mid-line newlines.
 - **I-2 Crash-free.** Any error in any segment must be swallowed into "skip that segment" or, at worst, into the `~\n` fallback. A return code of 0 is always produced (subject to OS limits).
 - **I-3 Sub-process budget.** All `git` subprocess calls run against the workspace `current_dir`. No arbitrary shell. No network. Statusline producers are expected to hide or kill slow renders.
-- **I-4 State writes are scoped.** The statusline never writes to rl files, producer files, or the repo. Its only normal write is a small per-session state file under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`. Debug/capture writes remain opt-in.
+- **I-4 State writes are scoped.** Render mode never writes to rl files, producer files, or the repo. Hook mode writes only small per-session activity files under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`. Debug/capture writes remain opt-in.
 - **I-5 File reads are bounded.** Every direct file read caps the byte count (512 KiB tail for transcripts). The delegated rl subprocess caps captured stdout at 1 KiB.
 - **I-6 Unknown fields are ignored.** All JSON parses use `ignore_unknown_fields = true`. Schema additions upstream must not break the statusline.
 - **I-7 Empty segments are hidden.** A segment that has nothing interesting to say emits zero bytes (not even a leading space).
@@ -106,7 +106,8 @@ Historical context only. The statusline no longer parses this schema directly; `
 
 - **REQ-SL-001**: The statusline reads one JSON statusline document from stdin. Fields are all optional. Unknown fields are ignored.
 - **REQ-SL-002**: If stdin JSON fails to parse, emit `~\n` (cyan) to stdout and exit 0. Log the parse error to `/tmp/statusline-debug.log` when `--debug` is set.
-- **REQ-SL-003**: `--debug` command-line flag or `STATUSLINE_DEBUG=1` enables writing the raw input, rendered output, and any diagnostics to `/tmp/statusline-debug.log` (append-only). `STATUSLINE_DEBUG_LOG=/absolute/path.log` overrides the debug log destination. No other command-line flags exist.
+- **REQ-SL-003**: `--debug` command-line flag or `STATUSLINE_DEBUG=1` enables writing the raw input, rendered output, and any diagnostics to `/tmp/statusline-debug.log` (append-only). `STATUSLINE_DEBUG_LOG=/absolute/path.log` overrides the debug log destination.
+- **REQ-SL-004A**: `activity-hook [event]` is a hook subcommand. It reads one hook JSON document from stdin, updates neutral activity state when possible, prints `{}` plus one newline, and exits 0. Unknown hook fields are ignored.
 - **REQ-SL-004**: `STATUSLINE_CAPTURE_DIR=/absolute/dir` enables live replay artifacts without changing visible output. For each render, the statusline writes `statusline-*.input.json` and `statusline-*.output.ansi` into the directory when possible. The directory must already exist; failures are swallowed per I-2.
 
 ### Workspace segment
@@ -169,8 +170,9 @@ Historical context only. The statusline no longer parses this schema directly; `
 - **REQ-SL-051**: Model segment (`{gauge} {emoji}`) is emitted when `input.model.display_name` is present. Claude models render with their Claude glyphs; recommended Codex model IDs render with model-specific glyphs (`gpt-5.5` 🧠, `gpt-5.4` 🔧, `gpt-5.4-mini` ⚡, `gpt-5.3-codex-spark` ✨); other Codex/GPT display names render with `⌘`; unknown models render `?`.
 - **REQ-SL-052**: Context usage prefers `context_window.used_percentage` when present (producer-calculated authoritative percentage). Otherwise it uses `context_window.current_usage`. Falls back to parsing the transcript's last assistant message (max 100 lines / 512 KiB tail scan). Effective context size is 77.5% of `context_window_size` (22.5% autocompact reserve) when calculating from tokens. Returns 0% when unavailable.
 - **REQ-SL-053**: Cost (`${usd}`), duration (`Nh|Nm|<1m`), and lines-changed (`+N/-N` in green/red) render when their source fields are present and non-zero. Rounding rules: `<$1 .2f`, `<$10 .1f`, `≥$10 integer`.
-- **REQ-SL-054**: Session event indicator (`💤{MM/DD HH:MM}`) is statusline-owned. The renderer hashes the session identity (`session_id`, else workspace path, else model, else `global`) to choose a state file, hashes the raw input JSON as the event fingerprint, and records the current local display timestamp when that fingerprint changes. Repeated identical render ticks keep the previous timestamp. The renderer does not read or write `~/.claude/.idle-since-*`.
-- **REQ-SL-057**: State location is neutral and overrideable. `STATUSLINE_STATE_DIR=/absolute/dir` wins when set. Otherwise `XDG_STATE_HOME/agent-statusline` is used when `XDG_STATE_HOME` is absolute. Otherwise the fallback is `~/.local/state/agent-statusline`. Missing or unwritable state directories fail open by hiding only the session-event indicator.
+- **REQ-SL-054**: Activity indicator is hook-owned. `UserPromptSubmit` writes `working` with `last_prompt_at` and renders as `💬{MM/DD HH:MM}`. `Stop` writes `idle` with `idle_since` and renders as `💤{MM/DD HH:MM}`. `SessionStart` clears state for that session. Render mode never infers activity from raw statusline payload changes and does not time out `working` state; long autonomous turns remain working until a lifecycle hook changes the state. `updated_at` is diagnostic metadata for state inspection.
+- **REQ-SL-057**: State location is neutral and overrideable. `STATUSLINE_STATE_DIR=/absolute/dir` wins when set. Otherwise `XDG_STATE_HOME/agent-statusline` is used when `XDG_STATE_HOME` is absolute. Otherwise the fallback is `~/.local/state/agent-statusline`. Missing or unwritable state directories fail open by hiding only the activity indicator.
+- **REQ-SL-058**: The bundled `agent-statusline` plugin provides the activity hooks for both Claude Code and Codex CLI. The hook wrapper locates the renderer through `AGENT_STATUSLINE_BIN`, `statusline` on `PATH`, or the repo-local build path.
 
 ## Acceptance criteria
 
@@ -213,8 +215,16 @@ Harness-agnostic cutover (this change set — 2026-06-28):
 
 - [x] Runtime contract does not require producer-provided activity timestamps.
 - [x] Codex fixture mirrors the actual Codex payload shape with `context_window.used_percentage`.
-- [x] Session event time is tracked in neutral renderer-owned state for both Claude Code and Codex.
+- [x] Activity time is tracked in neutral hook-owned state for both Claude Code and Codex.
 - [x] README, CLAUDE.md, SPEC.md, and source comments no longer present Claude Code as the only producer.
+
+Hook-backed activity cutover (this change set — 2026-06-28):
+
+- [x] Renderer no longer hashes raw statusline payloads to infer event time.
+- [x] `activity-hook` supports `SessionStart`, `UserPromptSubmit`, and `Stop`.
+- [x] Render mode displays prompt and idle timestamps from explicit activity state.
+- [x] Bundled plugin contains Codex and Claude manifests, hook wiring, marketplace metadata, and setup skill.
+- [x] `zig build test` passes.
 
 ## Risk tags
 

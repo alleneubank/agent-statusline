@@ -1,0 +1,35 @@
+{
+  "name": "agent-statusline",
+  "description": "Hook-backed activity tracking for the agent-statusline renderer across Codex CLI and Claude Code.",
+  "author": {
+    "name": "Allen Eubank",
+    "email": "bigboss@metalrodeo.xyz",
+    "url": "https://github.com/0xbigboss/agent-statusline"
+  },
+  "repository": "https://github.com/0xbigboss/agent-statusline",
+  "version": "0.2.0",
+  "skills": "./skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "statusline",
+    "codex",
+    "claude",
+    "hooks",
+    "activity"
+  ],
+  "interface": {
+    "displayName": "agent-statusline",
+    "shortDescription": "Activity hooks for the shared agent statusline",
+    "longDescription": "Adds UserPromptSubmit, Stop, and SessionStart hooks that maintain neutral per-session activity state consumed by the Zig statusline renderer.",
+    "developerName": "Allen Eubank",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Set up agent-statusline for this workspace",
+      "Verify the agent-statusline activity hooks",
+      "Debug why the statusline activity marker is stale"
+    ]
+  }
+}

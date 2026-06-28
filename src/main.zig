@@ -555,9 +555,27 @@ fn formatLinesChanged(input: StatuslineInput, writer: anytype) !bool {
 
 const state_app_dir = "agent-statusline";
 
-const SessionEventState = struct {
-    fingerprint: u64,
-    label: [11]u8,
+const ActivityKind = enum {
+    working,
+    idle,
+};
+
+const ActivityState = struct {
+    version: u8 = 1,
+    state: ActivityKind,
+    last_prompt_at: ?i64 = null,
+    idle_since: ?i64 = null,
+    // Diagnostic metadata only. Rendering is lifecycle-hook authoritative:
+    // a long-running autonomous turn must not disappear just because it is old.
+    updated_at: i64 = 0,
+};
+
+const ActivityHookInput = struct {
+    session_id: ?[]const u8 = null,
+    turn_id: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
+    hook_event_name: ?[]const u8 = null,
+    model: ?[]const u8 = null,
 };
 
 fn resolveStateDir(allocator: Allocator, override_dir: ?[]const u8, xdg_state_home: ?[]const u8, home: []const u8) ?[]const u8 {
@@ -575,26 +593,18 @@ fn resolveStateDir(allocator: Allocator, override_dir: ?[]const u8, xdg_state_ho
     return null;
 }
 
-fn sessionIdentity(input: StatuslineInput) []const u8 {
-    if (input.session_id) |sid| {
-        if (sid.len > 0) return sid;
-    }
-    if (input.workspace) |workspace| {
-        if (workspace.current_dir) |dir| {
-            if (dir.len > 0) return dir;
-        }
-    }
-    if (input.model) |model| {
-        if (model.display_name) |name| {
-            if (name.len > 0) return name;
-        }
-    }
-    return "global";
+fn activitySessionHash(session_id: []const u8) u64 {
+    return std.hash.Wyhash.hash(0, session_id);
 }
 
-fn sessionStatePath(allocator: Allocator, state_dir: []const u8, input: StatuslineInput) ![]const u8 {
-    const key_hash = std.hash.Wyhash.hash(0, sessionIdentity(input));
-    return std.fmt.allocPrint(allocator, "{s}/{x}.state", .{ state_dir, key_hash });
+fn activityStatePathForSessionId(allocator: Allocator, state_dir: []const u8, session_id: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{x}.activity.json", .{ state_dir, activitySessionHash(session_id) });
+}
+
+fn activityStatePathForInput(allocator: Allocator, state_dir: []const u8, input: StatuslineInput) ?[]const u8 {
+    const session_id = input.session_id orelse return null;
+    if (session_id.len == 0) return null;
+    return activityStatePathForSessionId(allocator, state_dir, session_id) catch null;
 }
 
 fn isDigit(byte: u8) bool {
@@ -651,68 +661,132 @@ fn currentUnixSeconds() i64 {
     return @intCast(now);
 }
 
-fn parseSessionEventState(content: []const u8) ?SessionEventState {
-    var parts = std.mem.tokenizeAny(u8, content, " \t\n\r");
-    const fingerprint_text = parts.next() orelse return null;
-    const label_text = std.mem.trim(u8, content[fingerprint_text.len..], " \t\n\r");
-    if (!isEventTimeLabel(label_text)) return null;
-
-    const fingerprint = std.fmt.parseInt(u64, fingerprint_text, 16) catch return null;
-    var label: [11]u8 = undefined;
-    @memcpy(&label, label_text[0..11]);
-    return .{ .fingerprint = fingerprint, .label = label };
+fn parseActivityState(allocator: Allocator, content: []const u8) ?ActivityState {
+    const parsed = json.parseFromSlice(ActivityState, allocator, content, .{
+        .ignore_unknown_fields = true,
+    }) catch return null;
+    defer parsed.deinit();
+    return parsed.value;
 }
 
-fn readSessionEventState(allocator: Allocator, io: std.Io, path: []const u8) ?SessionEventState {
+fn readActivityState(allocator: Allocator, io: std.Io, path: []const u8) ?ActivityState {
     var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer file.close(io);
 
-    var file_buffer: [128]u8 = undefined;
+    var file_buffer: [512]u8 = undefined;
     var file_reader = file.readerStreaming(io, &file_buffer);
     const content = readAllAlloc(allocator, &file_reader.interface) catch return null;
     defer allocator.free(content);
 
-    return parseSessionEventState(content);
+    return parseActivityState(allocator, content);
 }
 
-fn writeSessionEventState(io: std.Io, path: []const u8, state: SessionEventState) void {
-    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return;
+fn readActivityStateForInput(allocator: Allocator, io: std.Io, state_dir: ?[]const u8, input: StatuslineInput) ?ActivityState {
+    const dir = state_dir orelse return null;
+    const path = activityStatePathForInput(allocator, dir, input) orelse return null;
+    return readActivityState(allocator, io, path);
+}
+
+fn writeActivityState(allocator: Allocator, io: std.Io, path: []const u8, session_id: []const u8, state: ActivityState) void {
+    const tmp_path = std.fmt.allocPrint(allocator, "{s}.tmp.{d}", .{ path, currentUnixSeconds() }) catch return;
+    defer allocator.free(tmp_path);
+
+    const file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{}) catch return;
     defer file.close(io);
-    var file_buffer: [128]u8 = undefined;
+    var file_buffer: [512]u8 = undefined;
     var file_writer = file.writer(io, &file_buffer);
     const writer = &file_writer.interface;
-    writer.print("{x} {s}\n", .{ state.fingerprint, state.label }) catch return;
-    writer.flush() catch {};
+    writer.print(
+        "{{\"version\":{d},\"session_id_hash\":\"{x}\",\"state\":\"{s}\",\"last_prompt_at\":",
+        .{ state.version, activitySessionHash(session_id), @tagName(state.state) },
+    ) catch return;
+    if (state.last_prompt_at) |seconds| {
+        writer.print("{d}", .{seconds}) catch return;
+    } else {
+        writer.writeAll("null") catch return;
+    }
+    writer.writeAll(",\"idle_since\":") catch return;
+    if (state.idle_since) |seconds| {
+        writer.print("{d}", .{seconds}) catch return;
+    } else {
+        writer.writeAll("null") catch return;
+    }
+    writer.print(",\"updated_at\":{d}}}\n", .{state.updated_at}) catch return;
+    writer.flush() catch return;
+
+    std.Io.Dir.renameAbsolute(tmp_path, path, io) catch {
+        std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
+        return;
+    };
 }
 
-fn updateSessionEventState(
+fn activityEventName(cli_arg: ?[]const u8, hook_input: ActivityHookInput) ?[]const u8 {
+    if (cli_arg) |event| {
+        if (event.len > 0) return event;
+    }
+    if (hook_input.hook_event_name) |event| {
+        if (event.len > 0) return event;
+    }
+    return null;
+}
+
+fn handleActivityHook(
     allocator: Allocator,
     io: std.Io,
     state_dir: ?[]const u8,
-    input: StatuslineInput,
-    input_json: []const u8,
+    event_arg: ?[]const u8,
+    hook_json: []const u8,
     now_seconds: i64,
-) ?SessionEventState {
-    const dir = state_dir orelse return null;
-    const path = sessionStatePath(allocator, dir, input) catch return null;
-    std.Io.Dir.cwd().createDirPath(io, dir) catch return readSessionEventState(allocator, io, path);
+) void {
+    const dir = state_dir orelse return;
+    const parsed = json.parseFromSlice(ActivityHookInput, allocator, hook_json, .{
+        .ignore_unknown_fields = true,
+    }) catch return;
+    defer parsed.deinit();
 
-    const fingerprint = std.hash.Wyhash.hash(0, input_json);
-    if (readSessionEventState(allocator, io, path)) |previous| {
-        if (previous.fingerprint == fingerprint) return previous;
+    const session_id = parsed.value.session_id orelse return;
+    if (session_id.len == 0) return;
+    const path = activityStatePathForSessionId(allocator, dir, session_id) catch return;
+    defer allocator.free(path);
+    std.Io.Dir.cwd().createDirPath(io, dir) catch return;
+
+    const event = activityEventName(event_arg, parsed.value) orelse return;
+    if (std.mem.eql(u8, event, "SessionStart")) {
+        std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+        return;
     }
-
-    const next = SessionEventState{
-        .fingerprint = fingerprint,
-        .label = formatLocalEventTime(now_seconds),
-    };
-    writeSessionEventState(io, path, next);
-    return next;
+    if (std.mem.eql(u8, event, "UserPromptSubmit")) {
+        writeActivityState(allocator, io, path, session_id, .{
+            .state = .working,
+            .last_prompt_at = now_seconds,
+            .idle_since = null,
+            .updated_at = now_seconds,
+        });
+        return;
+    }
+    if (std.mem.eql(u8, event, "Stop")) {
+        const previous = readActivityState(allocator, io, path);
+        writeActivityState(allocator, io, path, session_id, .{
+            .state = .idle,
+            .last_prompt_at = if (previous) |state| state.last_prompt_at else null,
+            .idle_since = now_seconds,
+            .updated_at = now_seconds,
+        });
+    }
 }
 
-fn formatSessionEventTime(writer: anytype, state: ?SessionEventState) !bool {
+fn activityDisplay(state: ActivityState) ?struct { emoji: []const u8, seconds: i64 } {
+    return switch (state.state) {
+        .working => if (state.last_prompt_at) |seconds| .{ .emoji = "💬", .seconds = seconds } else null,
+        .idle => if (state.idle_since) |seconds| .{ .emoji = "💤", .seconds = seconds } else null,
+    };
+}
+
+fn formatActivityTime(writer: anytype, state: ?ActivityState) !bool {
     const s = state orelse return false;
-    try writer.print(" 💤{s}{s}{s}", .{ colors.light_gray, s.label, colors.reset });
+    const display = activityDisplay(s) orelse return false;
+    const label = formatLocalEventTime(display.seconds);
+    try writer.print(" {s}{s}{s}{s}", .{ display.emoji, colors.light_gray, label, colors.reset });
     return true;
 }
 
@@ -1268,10 +1342,17 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
 
+    const RunMode = enum { render, activity_hook };
+    var run_mode: RunMode = .render;
+    var hook_event_arg: ?[]const u8 = null;
     var debug_mode = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--debug")) {
             debug_mode = true;
+        } else if (std.mem.eql(u8, arg, "activity-hook")) {
+            run_mode = .activity_hook;
+        } else if (run_mode == .activity_hook and hook_event_arg == null) {
+            hook_event_arg = arg;
         }
     }
     debug_mode = debug_mode or envFlag(init.environ_map.get("STATUSLINE_DEBUG"));
@@ -1295,6 +1376,17 @@ pub fn main(init: std.process.Init) !void {
     // Debug logging
     appendDebug(io, debug_log_path, "Input JSON: {s}", .{input_json});
 
+    if (run_mode == .activity_hook) {
+        handleActivityHook(allocator, io, state_dir, hook_event_arg, input_json, currentUnixSeconds());
+
+        var stdout_buffer: [256]u8 = undefined;
+        var stdout_writer_wrapper = std.Io.File.stdout().writer(io, &stdout_buffer);
+        const stdout = &stdout_writer_wrapper.interface;
+        stdout.print("{{}}\n", .{}) catch {};
+        stdout.flush() catch {};
+        return;
+    }
+
     const parsed = json.parseFromSlice(StatuslineInput, allocator, input_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
@@ -1310,8 +1402,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const input = parsed.value;
-    const now_seconds = currentUnixSeconds();
-    const session_event_state = updateSessionEventState(allocator, io, state_dir, input, input_json, now_seconds);
+    const activity_state = readActivityStateForInput(allocator, io, state_dir, input);
 
     // Use a single buffer for the entire output
     var output_buf: [1024]u8 = undefined;
@@ -1455,9 +1546,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Last observed session event. The renderer owns this neutral state so
-    // producers do not need to write sidecar files or grow a timestamp field.
-    _ = try formatSessionEventTime(&writer, session_event_state);
+    // Activity is hook-owned so prompt and idle timestamps reflect actual
+    // lifecycle transitions instead of incidental status payload changes.
+    _ = try formatActivityTime(&writer, activity_state);
 
     // Output the complete statusline at once
     const output = writer.buffered();
@@ -2294,27 +2385,120 @@ test "resolveStateDir uses neutral statusline-owned paths" {
     try std.testing.expectEqualStrings("/home/test/.local/state/" ++ state_app_dir, home);
 }
 
-test "parseSessionEventState parses fingerprint and label" {
-    const parsed = parseSessionEventState("2a 06/28 15:24\n").?;
-    try std.testing.expectEqual(@as(u64, 0x2a), parsed.fingerprint);
-    try std.testing.expectEqualStrings("06/28 15:24", &parsed.label);
-    try std.testing.expect(parseSessionEventState("2a bad\n") == null);
-}
-
 test "formatUtcEventTime formats date and time" {
     try std.testing.expectEqualStrings("01/01 00:00", &formatUtcEventTime(0));
     try std.testing.expectEqualStrings("01/01 01:05", &formatUtcEventTime((60 * 60) + (5 * 60)));
     try std.testing.expectEqualStrings("01/01 23:59", &formatUtcEventTime((23 * 60 * 60) + (59 * 60)));
 }
 
-test "formatSessionEventTime renders stored timestamp" {
+test "parseActivityState parses lifecycle state" {
+    const parsed = parseActivityState(std.testing.allocator,
+        \\{"version":1,"session_id_hash":"2a","state":"idle","last_prompt_at":10,"idle_since":20,"updated_at":20}
+    ).?;
+    try std.testing.expectEqual(ActivityKind.idle, parsed.state);
+    try std.testing.expectEqual(@as(?i64, 10), parsed.last_prompt_at);
+    try std.testing.expectEqual(@as(?i64, 20), parsed.idle_since);
+    try std.testing.expectEqual(@as(i64, 20), parsed.updated_at);
+    try std.testing.expect(parseActivityState(std.testing.allocator, "{\"state\":\"unknown\"}") == null);
+}
+
+test "activity hook input parses Codex user prompt submit payload" {
+    const parsed = try json.parseFromSlice(ActivityHookInput, std.testing.allocator,
+        \\{"session_id":"sid-1","hook_event_name":"UserPromptSubmit","prompt":"fix it","turn_id":"turn-1","cwd":"/tmp/repo","permission_mode":"default"}
+    , .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("sid-1", parsed.value.session_id.?);
+    try std.testing.expectEqualStrings("UserPromptSubmit", parsed.value.hook_event_name.?);
+}
+
+test "activity hook lifecycle writes prompt, idle, and session-start states" {
+    const allocator = std.testing.allocator;
+    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/agent-statusline-test-{x}", .{std.testing.random_seed});
+    defer allocator.free(tmp_path);
+
+    const io = std.testing.io;
+    defer std.Io.Dir.deleteTree(std.Io.Dir.cwd(), io, tmp_path) catch {};
+    const prompt_json = "{\"session_id\":\"sid-lifecycle\",\"hook_event_name\":\"UserPromptSubmit\"}";
+    handleActivityHook(allocator, io, tmp_path, null, prompt_json, 10);
+
+    const state_path = try activityStatePathForSessionId(allocator, tmp_path, "sid-lifecycle");
+    defer allocator.free(state_path);
+
+    const working = readActivityState(allocator, io, state_path).?;
+    try std.testing.expectEqual(ActivityKind.working, working.state);
+    try std.testing.expectEqual(@as(?i64, 10), working.last_prompt_at);
+    try std.testing.expectEqual(@as(?i64, null), working.idle_since);
+    try std.testing.expectEqual(@as(i64, 10), working.updated_at);
+
+    handleActivityHook(allocator, io, tmp_path, "Stop", "{\"session_id\":\"sid-lifecycle\"}", 20);
+    const idle = readActivityState(allocator, io, state_path).?;
+    try std.testing.expectEqual(ActivityKind.idle, idle.state);
+    try std.testing.expectEqual(@as(?i64, 10), idle.last_prompt_at);
+    try std.testing.expectEqual(@as(?i64, 20), idle.idle_since);
+    try std.testing.expectEqual(@as(i64, 20), idle.updated_at);
+
+    handleActivityHook(allocator, io, tmp_path, "SessionStart", "{\"session_id\":\"sid-lifecycle\"}", 30);
+    try std.testing.expect(readActivityState(allocator, io, state_path) == null);
+}
+
+test "activityDisplay chooses prompt and idle timestamps" {
+    const working = activityDisplay(.{
+        .state = .working,
+        .last_prompt_at = 10,
+        .updated_at = 10,
+    }).?;
+    try std.testing.expectEqualStrings("💬", working.emoji);
+    try std.testing.expectEqual(@as(i64, 10), working.seconds);
+
+    const idle = activityDisplay(.{
+        .state = .idle,
+        .last_prompt_at = 10,
+        .idle_since = 20,
+        .updated_at = 20,
+    }).?;
+    try std.testing.expectEqualStrings("💤", idle.emoji);
+    try std.testing.expectEqual(@as(i64, 20), idle.seconds);
+
+    try std.testing.expect(activityDisplay(.{
+        .state = .working,
+        .updated_at = 0,
+    }) == null);
+}
+
+test "formatActivityTime renders working prompt timestamp" {
     var buf: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
 
-    const result = try formatSessionEventTime(&writer, SessionEventState{
-        .fingerprint = 1,
-        .label = "06/28 15:24".*,
+    const result = try formatActivityTime(&writer, ActivityState{
+        .state = .working,
+        .last_prompt_at = 0,
+        .updated_at = 0,
     });
     try std.testing.expect(result);
-    try std.testing.expectEqualStrings(" 💤" ++ colors.light_gray ++ "06/28 15:24" ++ colors.reset, writer.buffered());
+
+    const label = formatLocalEventTime(0);
+    var expected_buf: [128]u8 = undefined;
+    var expected_writer = std.Io.Writer.fixed(&expected_buf);
+    try expected_writer.print(" 💬{s}{s}{s}", .{ colors.light_gray, label, colors.reset });
+    try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+}
+
+test "formatActivityTime renders idle timestamp" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const result = try formatActivityTime(&writer, ActivityState{
+        .state = .idle,
+        .last_prompt_at = 0,
+        .idle_since = 60,
+        .updated_at = 60,
+    });
+    try std.testing.expect(result);
+
+    const label = formatLocalEventTime(60);
+    var expected_buf: [128]u8 = undefined;
+    var expected_writer = std.Io.Writer.fixed(&expected_buf);
+    try expected_writer.print(" 💤{s}{s}{s}", .{ colors.light_gray, label, colors.reset });
+    try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
 }

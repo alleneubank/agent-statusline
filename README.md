@@ -16,7 +16,7 @@ A fast, single-line status renderer for command-backed agent statusline payloads
 - `STATUSLINE_CAPTURE_DIR=/absolute/dir` writes replay artifacts for every render:
   `statusline-*.input.json` and `statusline-*.output.ansi`.
 - Claude Code and Codex-style status payloads are supported. Claude models render with their existing glyphs; recommended Codex models render with model-specific glyphs (`gpt-5.5` 🧠, `gpt-5.4` 🔧, `gpt-5.4-mini` ⚡, `gpt-5.3-codex-spark` ✨), with `⌘` as the generic GPT/Codex fallback.
-- Session event display is renderer-owned: the statusline stores a per-session fingerprint/timestamp under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
+- Activity display is hook-owned: the `agent-statusline` plugin records `UserPromptSubmit` as `💬 MM/DD HH:MM` and `Stop` as `💤 MM/DD HH:MM` under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
 
 See [`SPEC.md`](SPEC.md) for the full contract (requirements, invariants, segment rules).
 
@@ -54,6 +54,17 @@ Build a release binary and point your Claude Code `statusLine` setting at it (`~
 
 Claude Code pipes the status JSON to the command on stdin and renders its stdout.
 
+Install or enable the bundled plugin in `plugins/agent-statusline` so activity
+hooks can update prompt/idle state. The hook wrapper must be able to find the
+same binary through one of:
+
+- `AGENT_STATUSLINE_BIN=/absolute/path/to/zig-out/bin/statusline`
+- `statusline` on `PATH`
+- this checkout's default `plugins/agent-statusline` to `../../zig-out/bin/statusline` layout
+
+Claude marketplace metadata lives at
+[`./.claude-plugin/marketplace.json`](./.claude-plugin/marketplace.json).
+
 ## Use with Codex
 
 With a Codex build that supports command-backed custom status lines, configure the renderer as the command:
@@ -65,6 +76,24 @@ command = "/absolute/path/to/zig-out/bin/statusline"
 ```
 
 Codex pipes a JSON snapshot to the command on stdin. Empty, failing, or timed-out renderer output is hidden by Codex.
+
+The same `plugins/agent-statusline` plugin supports Codex hooks. A Codex
+marketplace entry is provided in [`marketplace.json`](marketplace.json). The
+plugin listens for `SessionStart`, `UserPromptSubmit`, and `Stop` and writes
+neutral activity state consumed by the renderer; no Codex CLI changes are
+required.
+
+## Activity hook
+
+The renderer also exposes a hook subcommand used by the plugin:
+
+```bash
+printf '{"session_id":"demo","hook_event_name":"UserPromptSubmit"}' \
+  | ./zig-out/bin/statusline activity-hook UserPromptSubmit
+```
+
+Hook mode always prints `{}` and exits 0. It ignores unknown JSON fields, writes
+only neutral per-session state, and fails open when state cannot be written.
 
 ## Debug capture
 

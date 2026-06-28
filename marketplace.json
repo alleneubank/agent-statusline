@@ -1,0 +1,20 @@
+{
+  "name": "agent-statusline",
+  "interface": {
+    "displayName": "agent-statusline"
+  },
+  "plugins": [
+    {
+      "name": "agent-statusline",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-statusline"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
