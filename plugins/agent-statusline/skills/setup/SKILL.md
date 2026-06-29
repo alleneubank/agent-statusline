@@ -1,5 +1,5 @@
 ---
-name: setup-agent-statusline
+name: setup
 description: Install, configure, or debug the agent-statusline renderer and its Codex CLI / Claude Code activity hooks. Use when a user asks to set up the shared statusline, install the plugin, wire statusLine/custom_status_line, or verify prompt/idle activity markers.
 ---
 
