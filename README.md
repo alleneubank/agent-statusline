@@ -101,7 +101,7 @@ codex plugin add agent-statusline@agent-statusline
 ```
 
 For rapid local iteration, use a semver build suffix such as
-`0.2.1+codex.local-YYYYMMDD-HHMMSS` instead of bumping the release version for
+`0.2.2+codex.local-YYYYMMDD-HHMMSS` instead of bumping the release version for
 every edit.
 
 ## Activity hook
@@ -130,6 +130,12 @@ STATUSLINE_DEBUG_LOG=/tmp/statusline-captures/statusline.log \
 
 Use the captured `*.input.json` files as replay fixtures while fixing parser or
 rendering drift. Capture failures are best-effort and never affect stdout.
+
+For hook-level debugging, set `STATUSLINE_HOOK_DEBUG=1` to write metadata to
+`/tmp/codex-statusline-captures/statusline-hook.log`, or set
+`STATUSLINE_HOOK_DEBUG_LOG=/absolute/path.log` to choose the destination. Hook
+debugging records event names, payload byte counts, session ids, selected
+binaries, and exit codes without dumping the full hook payload.
 
 ## License
 

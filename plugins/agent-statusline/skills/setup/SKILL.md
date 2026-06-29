@@ -83,7 +83,7 @@ codex plugin add agent-statusline@agent-statusline
 ```
 
 For local-only iteration, prefer a Codex cachebuster build suffix on the plugin
-manifest version, such as `0.2.1+codex.local-YYYYMMDD-HHMMSS`, instead of
+manifest version, such as `0.2.2+codex.local-YYYYMMDD-HHMMSS`, instead of
 bumping the release semver for every edit.
 
 ## Debugging
@@ -91,3 +91,4 @@ bumping the release semver for every edit.
 - State lives under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
 - Hook failures must not break the producer. The wrapper prints `{}` and exits 0 when it cannot find the binary.
 - Use `STATUSLINE_DEBUG=1` or `STATUSLINE_DEBUG_LOG=/absolute/path.log` only when inspecting renderer behavior.
+- Use `STATUSLINE_HOOK_DEBUG=1` or `STATUSLINE_HOOK_DEBUG_LOG=/absolute/path.log` only when inspecting hook wrapper behavior.
