@@ -66,6 +66,26 @@ printf '{"session_id":"setup-check","hook_event_name":"Stop"}' \
 
 The first render after `UserPromptSubmit` should show the prompt emoji. The render after `Stop` should show the sleep emoji.
 
+## Updating Local Installs
+
+`codex plugin list` shows the installed cache version. When the repo-local
+plugin source changes, refresh the cache with:
+
+```bash
+codex plugin add agent-statusline@agent-statusline
+```
+
+If the old version remains installed, remove and reinstall:
+
+```bash
+codex plugin remove agent-statusline@agent-statusline
+codex plugin add agent-statusline@agent-statusline
+```
+
+For local-only iteration, prefer a Codex cachebuster build suffix on the plugin
+manifest version, such as `0.2.0+codex.local-YYYYMMDD-HHMMSS`, instead of
+bumping the release semver for every edit.
+
 ## Debugging
 
 - State lives under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.

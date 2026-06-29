@@ -83,6 +83,27 @@ plugin listens for `SessionStart`, `UserPromptSubmit`, and `Stop` and writes
 neutral activity state consumed by the renderer; no Codex CLI changes are
 required.
 
+### Updating the local Codex plugin
+
+`codex plugin list` reports the installed plugin cache version, not just the
+source manifest version in this checkout. After changing the local plugin,
+refresh the installed cache with:
+
+```bash
+codex plugin add agent-statusline@agent-statusline
+```
+
+If the cache still points at an older version, reinstall it explicitly:
+
+```bash
+codex plugin remove agent-statusline@agent-statusline
+codex plugin add agent-statusline@agent-statusline
+```
+
+For rapid local iteration, use a semver build suffix such as
+`0.2.0+codex.local-YYYYMMDD-HHMMSS` instead of bumping the release version for
+every edit.
+
 ## Activity hook
 
 The renderer also exposes a hook subcommand used by the plugin:
