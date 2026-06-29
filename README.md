@@ -101,7 +101,7 @@ codex plugin add agent-statusline@agent-statusline
 ```
 
 For rapid local iteration, use a semver build suffix such as
-`0.2.0+codex.local-YYYYMMDD-HHMMSS` instead of bumping the release version for
+`0.2.1+codex.local-YYYYMMDD-HHMMSS` instead of bumping the release version for
 every edit.
 
 ## Activity hook

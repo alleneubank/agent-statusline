@@ -83,7 +83,7 @@ codex plugin add agent-statusline@agent-statusline
 ```
 
 For local-only iteration, prefer a Codex cachebuster build suffix on the plugin
-manifest version, such as `0.2.0+codex.local-YYYYMMDD-HHMMSS`, instead of
+manifest version, such as `0.2.1+codex.local-YYYYMMDD-HHMMSS`, instead of
 bumping the release semver for every edit.
 
 ## Debugging
