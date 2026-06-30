@@ -16,6 +16,7 @@ A fast, single-line status renderer for command-backed agent statusline payloads
 - `STATUSLINE_CAPTURE_DIR=/absolute/dir` writes replay artifacts for every render:
   `statusline-*.input.json` and `statusline-*.output.ansi`.
 - Claude Code and Codex-style status payloads are supported. Claude models render with their existing glyphs; recommended Codex models render with model-specific glyphs (`gpt-5.5` 🧠, `gpt-5.4` 🔧, `gpt-5.4-mini` ⚡, `gpt-5.3-codex-spark` ✨), with `⌘` as the generic GPT/Codex fallback.
+- Codex goal payloads render active goal attention as `🎯`; when `tokens_used` and `token_budget` are present, the segment renders compact progress such as `🎯12.5k/50k`.
 - Activity display is hook-owned: the `agent-statusline` plugin records `UserPromptSubmit` as `💬 MM/DD HH:MM` and `Stop` as `💤 MM/DD HH:MM` under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
 
 See [`SPEC.md`](SPEC.md) for the full contract (requirements, invariants, segment rules).
@@ -37,6 +38,7 @@ Quick check:
 ```bash
 zig build && ./zig-out/bin/statusline < test/opus.json
 zig build && ./zig-out/bin/statusline < test/codex.json
+zig build && ./zig-out/bin/statusline < test/codex-goal.json
 ```
 
 ## Use with Claude Code
@@ -76,6 +78,21 @@ command = "/absolute/path/to/zig-out/bin/statusline"
 ```
 
 Codex pipes a JSON snapshot to the command on stdin. Empty, failing, or timed-out renderer output is hidden by Codex.
+
+When the payload includes a `goal` object with `status = "active"`, the
+renderer shows an active-goal marker. The Codex fork payload shape is:
+
+```json
+{
+  "goal": {
+    "objective": "...",
+    "status": "active",
+    "token_budget": 50000,
+    "tokens_used": 12500,
+    "time_used_seconds": 120
+  }
+}
+```
 
 The same `plugins/agent-statusline` plugin supports Codex hooks. A Codex
 marketplace entry is provided in [`marketplace.json`](marketplace.json). The

@@ -54,6 +54,7 @@ stdin (JSON StatuslineInput)
 - `ActivityState` — hook-owned per-session state containing `working` / `idle`, `last_prompt_at`, `idle_since`, and `updated_at`. It lets the renderer show prompt and idle transitions without requiring producer statusline payload changes.
 - `ContextUsage` — `{ percentage, total_tokens }`. Renders a 5-char, 40-step eighth-block gauge with an RGB gradient (green → yellow → red).
 - `ModelType` — `opus | sonnet | haiku | fable | gpt55 | gpt54 | gpt54_mini | gpt53_codex_spark | codex | unknown`. Drives the model glyph (`🎭📜🍃🦊🧠🔧⚡✨⌘?`).
+- `CodexGoal` — optional producer-provided goal snapshot containing `objective`, `status`, `token_budget`, `tokens_used`, and `time_used_seconds`. Only active goals render.
 - `GitStatus` — `{ added, modified, deleted, untracked }`. Parsed from `git status --porcelain`.
 
 ### rl 1.0 state schema (source: `~/0xbigboss/rl/SPEC.md:387-418`)
@@ -171,6 +172,7 @@ Historical context only. The statusline no longer parses this schema directly; `
 - **REQ-SL-052**: Context usage prefers `context_window.used_percentage` when present (producer-calculated authoritative percentage). Otherwise it uses `context_window.current_usage`. Falls back to parsing the transcript's last assistant message (max 100 lines / 512 KiB tail scan). Effective context size is 77.5% of `context_window_size` (22.5% autocompact reserve) when calculating from tokens. Returns 0% when unavailable.
 - **REQ-SL-053**: Cost (`${usd}`), duration (`Nh|Nm|<1m`), and lines-changed (`+N/-N` in green/red) render when their source fields are present and non-zero. Rounding rules: `<$1 .2f`, `<$10 .1f`, `≥$10 integer`.
 - **REQ-SL-054**: Activity indicator is hook-owned. `UserPromptSubmit` writes `working` with `last_prompt_at` and renders as `💬{MM/DD HH:MM}`. `Stop` writes `idle` with `idle_since` and renders as `💤{MM/DD HH:MM}`. `SessionStart` clears state for that session. Render mode never infers activity from raw statusline payload changes and does not time out `working` state; long autonomous turns remain working until a lifecycle hook changes the state. `updated_at` is diagnostic metadata for state inspection.
+- **REQ-SL-059**: Codex goal attention renders only when `input.goal.status == "active"` or `input.goal.active == true`. The segment is `🎯active` when no counters exist, `🎯{tokens_used}` when only `tokens_used` exists, and `🎯{tokens_used}/{token_budget}` when both counters exist. Counts use compact `k`/`M` suffixes. Non-active, absent, or null goal payloads hide the segment.
 - **REQ-SL-057**: State location is neutral and overrideable. `STATUSLINE_STATE_DIR=/absolute/dir` wins when set. Otherwise `XDG_STATE_HOME/agent-statusline` is used when `XDG_STATE_HOME` is absolute. Otherwise the fallback is `~/.local/state/agent-statusline`. Missing or unwritable state directories fail open by hiding only the activity indicator.
 - **REQ-SL-058**: The bundled `agent-statusline` plugin provides the activity hooks for both Claude Code and Codex CLI. The hook wrapper locates the renderer through `AGENT_STATUSLINE_BIN`, `statusline` on `PATH`, or the repo-local build path.
 

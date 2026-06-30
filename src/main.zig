@@ -53,6 +53,23 @@ const CurrentUsage = struct {
     }
 };
 
+/// Snapshot emitted by Codex custom statusline payloads when a thread goal exists.
+const CodexGoal = struct {
+    objective: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+    active: ?bool = null,
+    token_budget: ?i64 = null,
+    tokens_used: ?i64 = null,
+    time_used_seconds: ?i64 = null,
+
+    fn isActive(self: CodexGoal) bool {
+        if (self.status) |status| {
+            if (std.ascii.eqlIgnoreCase(status, "active")) return true;
+        }
+        return self.active orelse false;
+    }
+};
+
 /// Input structure from supported agent statusline producers.
 const StatuslineInput = struct {
     workspace: ?struct {
@@ -81,6 +98,7 @@ const StatuslineInput = struct {
         total_lines_added: ?i64 = null,
         total_lines_removed: ?i64 = null,
     } = null,
+    goal: ?CodexGoal = null,
 };
 
 /// Model type detection
@@ -550,6 +568,62 @@ fn formatLinesChanged(input: StatuslineInput, writer: anytype) !bool {
         removed,
         colors.reset,
     });
+    return true;
+}
+
+fn formatCompactCount(writer: anytype, value: i64) !bool {
+    if (value < 0) return false;
+    const count: u64 = @intCast(value);
+    if (count < 1000) {
+        try writer.print("{d}", .{count});
+        return true;
+    }
+
+    const units = [_]struct { suffix: []const u8, scale: u64 }{
+        .{ .suffix = "M", .scale = 1_000_000 },
+        .{ .suffix = "k", .scale = 1_000 },
+    };
+
+    inline for (units) |unit| {
+        if (count >= unit.scale) {
+            var whole = @divTrunc(count, unit.scale);
+            const remainder = @mod(count, unit.scale);
+            var decimal = @divTrunc(remainder * 10 + @divTrunc(unit.scale, 2), unit.scale);
+            if (decimal == 10) {
+                whole += 1;
+                decimal = 0;
+            }
+            if (decimal == 0) {
+                try writer.print("{d}{s}", .{ whole, unit.suffix });
+            } else {
+                try writer.print("{d}.{d}{s}", .{ whole, decimal, unit.suffix });
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn formatCodexGoal(writer: anytype, input: StatuslineInput) !bool {
+    const goal = input.goal orelse return false;
+    if (!goal.isActive()) return false;
+
+    try writer.print(" {s}🎯{s}", .{ colors.yellow, colors.light_gray });
+
+    const used = goal.tokens_used;
+    const budget = goal.token_budget;
+    if (used != null and used.? >= 0 and budget != null and budget.? > 0) {
+        _ = try formatCompactCount(writer, used.?);
+        try writer.writeByte('/');
+        _ = try formatCompactCount(writer, budget.?);
+    } else if (used != null and used.? >= 0) {
+        _ = try formatCompactCount(writer, used.?);
+    } else {
+        try writer.writeAll("active");
+    }
+
+    try writer.writeAll(colors.reset);
     return true;
 }
 
@@ -1481,6 +1555,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    _ = try formatCodexGoal(&writer, input);
+
     // Add model display with gauge
     if (input.model) |model| {
         if (model.display_name) |name| {
@@ -2337,6 +2413,125 @@ test "JSON parsing with Codex used_percentage field" {
     try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName(parsed.value.model.?.display_name.?));
     try std.testing.expectEqual(@as(f64, 52.0), parsed.value.context_window.?.used_percentage.?);
     try std.testing.expectEqual(@as(i64, 15), parsed.value.context_window.?.current_usage.?.totalTokens());
+}
+
+test "JSON parsing with Codex active goal payload" {
+    const allocator = std.testing.allocator;
+
+    const codex_json =
+        \\{
+        \\  "session_id": "codex-session",
+        \\  "goal": {
+        \\    "objective": "Add goal attention",
+        \\    "status": "active",
+        \\    "token_budget": 50000,
+        \\    "tokens_used": 12500,
+        \\    "time_used_seconds": 120
+        \\  }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(StatuslineInput, allocator, codex_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const goal = parsed.value.goal.?;
+    try std.testing.expect(goal.isActive());
+    try std.testing.expectEqualStrings("Add goal attention", goal.objective.?);
+    try std.testing.expectEqualStrings("active", goal.status.?);
+    try std.testing.expectEqual(@as(i64, 50000), goal.token_budget.?);
+    try std.testing.expectEqual(@as(i64, 12500), goal.tokens_used.?);
+    try std.testing.expectEqual(@as(i64, 120), goal.time_used_seconds.?);
+}
+
+test "formatCodexGoal renders active token budget and hides inactive goals" {
+    {
+        var buf: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+
+        const result = try formatCodexGoal(&writer, StatuslineInput{
+            .goal = .{
+                .status = "active",
+                .token_budget = 50000,
+                .tokens_used = 12500,
+            },
+        });
+        try std.testing.expect(result);
+
+        var expected_buf: [128]u8 = undefined;
+        var expected_writer = std.Io.Writer.fixed(&expected_buf);
+        try expected_writer.print(" {s}🎯{s}12.5k/50k{s}", .{ colors.yellow, colors.light_gray, colors.reset });
+        try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+    }
+
+    {
+        var buf: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+
+        const result = try formatCodexGoal(&writer, StatuslineInput{
+            .goal = .{
+                .status = "paused",
+                .token_budget = 50000,
+                .tokens_used = 12500,
+            },
+        });
+        try std.testing.expect(!result);
+        try std.testing.expectEqualStrings("", writer.buffered());
+    }
+}
+
+test "formatCodexGoal supports boolean active payloads without counters" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const result = try formatCodexGoal(&writer, StatuslineInput{
+        .goal = .{
+            .active = true,
+        },
+    });
+    try std.testing.expect(result);
+
+    var expected_buf: [128]u8 = undefined;
+    var expected_writer = std.Io.Writer.fixed(&expected_buf);
+    try expected_writer.print(" {s}🎯{s}active{s}", .{ colors.yellow, colors.light_gray, colors.reset });
+    try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+}
+
+test "formatCodexGoal status active wins over active false" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const result = try formatCodexGoal(&writer, StatuslineInput{
+        .goal = .{
+            .status = "active",
+            .active = false,
+        },
+    });
+    try std.testing.expect(result);
+
+    var expected_buf: [128]u8 = undefined;
+    var expected_writer = std.Io.Writer.fixed(&expected_buf);
+    try expected_writer.print(" {s}🎯{s}active{s}", .{ colors.yellow, colors.light_gray, colors.reset });
+    try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+}
+
+test "formatCodexGoal renders zero used tokens when present without budget" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const result = try formatCodexGoal(&writer, StatuslineInput{
+        .goal = .{
+            .status = "active",
+            .tokens_used = 0,
+        },
+    });
+    try std.testing.expect(result);
+
+    var expected_buf: [128]u8 = undefined;
+    var expected_writer = std.Io.Writer.fixed(&expected_buf);
+    try expected_writer.print(" {s}🎯{s}0{s}", .{ colors.yellow, colors.light_gray, colors.reset });
+    try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
 }
 
 test "current_usage field fallback when missing" {
