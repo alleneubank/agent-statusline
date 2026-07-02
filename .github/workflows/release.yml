@@ -1,0 +1,63 @@
+# Release: build per-platform statusline binaries and attach them to the
+# GitHub release for the pushed tag.
+#
+# Asset naming mirrors zmx (`<name>-<version>-<os>-<arch>.tar.gz` + `.sha256`),
+# the pattern mise's ubi backend already consumes successfully — these assets
+# feed the `ubi:alleneubank/agent-statusline` entry in the dotfiles mise
+# config (dotfiles SPEC.md REQ-UP-019 / OPEN-3).
+#
+# No code signing: Zig's linker ad-hoc signs macOS binaries at link time
+# (including cross-compiled ones), and ubi/mise downloads carry no quarantine
+# xattr, so Gatekeeper's Developer-ID path never triggers.
+#
+# Targets cover the current machine fleet (macos-arm64, linux-x64 — see
+# MISE_LOCK_PLATFORMS in dotfiles); extend the matrix when a new machine
+# class joins.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          # Keep in lockstep with build.zig.zon's minimum_zig_version.
+          version: 0.16.0
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          # label (asset name token) -> zig -Dtarget triple. musl for the
+          # linux asset: statically linked, runs on any distro.
+          for pair in \
+            "macos-aarch64 aarch64-macos" \
+            "linux-x86_64 x86_64-linux-musl"; do
+            label="${pair%% *}"
+            target="${pair##* }"
+            zig build -Doptimize=ReleaseFast -Dtarget="$target"
+            asset="statusline-${version}-${label}.tar.gz"
+            tar -C zig-out/bin -czf "dist/$asset" statusline
+            (cd dist && sha256sum "$asset" > "$asset.sha256")
+          done
+          ls -l dist
+
+      - name: Create release with assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Create the release for this tag, or attach assets if it already
+          # exists (e.g. a hand-created release).
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/* \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber
