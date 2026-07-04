@@ -26,5 +26,14 @@
   "cost": {
     "total_cost_usd": null,
     "total_duration_ms": 42000
+  },
+  "permissions": {
+    "approval_policy": "on-request",
+    "active_profile_id": ":workspace",
+    "active_profile_extends": null,
+    "file_system": "restricted",
+    "network": "restricted",
+    "enforcement": "managed",
+    "yolo": false
   }
 }

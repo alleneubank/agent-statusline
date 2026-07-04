@@ -11,7 +11,7 @@
       "name": "agent-statusline",
       "description": "Tracks prompt and idle transitions for the Zig agent-statusline renderer.",
       "source": "./plugins/agent-statusline",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "category": "developer-tools",
       "author": {
         "name": "Allen Eubank",

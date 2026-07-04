@@ -70,6 +70,17 @@ const CodexGoal = struct {
     }
 };
 
+/// Permission snapshot emitted by Codex custom statusline payloads.
+const PermissionsInput = struct {
+    approval_policy: ?[]const u8 = null,
+    active_profile_id: ?[]const u8 = null,
+    active_profile_extends: ?[]const u8 = null,
+    file_system: ?[]const u8 = null,
+    network: ?[]const u8 = null,
+    enforcement: ?[]const u8 = null,
+    yolo: ?bool = null,
+};
+
 /// Input structure from supported agent statusline producers.
 const StatuslineInput = struct {
     workspace: ?struct {
@@ -99,6 +110,13 @@ const StatuslineInput = struct {
         total_lines_removed: ?i64 = null,
     } = null,
     goal: ?CodexGoal = null,
+    // Claude Code does not currently document permission_mode in statusLine
+    // stdin. Keep this as a compatibility fallback because Claude hook payloads
+    // have carried it, and rendering it matches the Codex permission badge.
+    permission_mode: ?[]const u8 = null,
+    approval_policy: ?[]const u8 = null,
+    sandbox_policy: ?json.Value = null,
+    permissions: ?PermissionsInput = null,
 };
 
 /// Model type detection
@@ -623,6 +641,156 @@ fn formatCodexGoal(writer: anytype, input: StatuslineInput) !bool {
         try writer.writeAll("active");
     }
 
+    try writer.writeAll(colors.reset);
+    return true;
+}
+
+const PermissionDisplay = struct {
+    color: []const u8,
+    primary: []const u8,
+    secondary: ?[]const u8 = null,
+};
+
+fn sandboxPolicyKind(sandbox_policy: ?json.Value) ?[]const u8 {
+    const value = sandbox_policy orelse return null;
+    return switch (value) {
+        .string => |kind| kind,
+        .object => |object| blk: {
+            const kind = object.get("type") orelse break :blk null;
+            if (kind == .string) break :blk kind.string;
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+fn approvalLabel(policy: ?[]const u8) ?[]const u8 {
+    const value = policy orelse return null;
+    if (std.ascii.eqlIgnoreCase(value, "on-request")) return "ask";
+    if (std.ascii.eqlIgnoreCase(value, "on-failure")) return "ask";
+    if (std.ascii.eqlIgnoreCase(value, "untrusted")) return "trust";
+    if (std.ascii.eqlIgnoreCase(value, "granular")) return "gran";
+    if (std.ascii.eqlIgnoreCase(value, "never")) return "never";
+    return value;
+}
+
+fn sandboxLabel(kind: ?[]const u8) ?[]const u8 {
+    const value = kind orelse return null;
+    if (std.ascii.eqlIgnoreCase(value, "danger-full-access")) return "full";
+    if (std.ascii.eqlIgnoreCase(value, "workspace-write")) return "work";
+    if (std.ascii.eqlIgnoreCase(value, "read-only")) return "ro";
+    if (std.ascii.eqlIgnoreCase(value, "external-sandbox")) return "ext";
+    if (std.ascii.eqlIgnoreCase(value, "unrestricted")) return "full";
+    if (std.ascii.eqlIgnoreCase(value, "restricted")) return "work";
+    if (std.ascii.eqlIgnoreCase(value, "external")) return "ext";
+    return value;
+}
+
+fn profileSandboxLabel(permissions: PermissionsInput) ?[]const u8 {
+    if (permissions.yolo orelse false) return "full";
+
+    if (permissions.active_profile_id) |profile_id| {
+        if (asciiContainsIgnoreCase(profile_id, "danger-full-access")) return "full";
+        if (asciiContainsIgnoreCase(profile_id, "read-only")) return "ro";
+        if (asciiContainsIgnoreCase(profile_id, "workspace")) return "work";
+    }
+    if (permissions.active_profile_extends) |profile_extends| {
+        if (asciiContainsIgnoreCase(profile_extends, "danger-full-access")) return "full";
+        if (asciiContainsIgnoreCase(profile_extends, "read-only")) return "ro";
+        if (asciiContainsIgnoreCase(profile_extends, "workspace")) return "work";
+    }
+
+    return sandboxLabel(permissions.file_system);
+}
+
+fn codexPermissionColor(approval: ?[]const u8, sandbox: ?[]const u8, permissions: ?PermissionsInput) []const u8 {
+    if (permissions) |perms| {
+        if (perms.yolo orelse false) return colors.red;
+        if (perms.file_system) |file_system| {
+            if (std.ascii.eqlIgnoreCase(file_system, "unrestricted")) return colors.red;
+            if (std.ascii.eqlIgnoreCase(file_system, "external")) return colors.yellow;
+        }
+        if (profileSandboxLabel(perms)) |label| {
+            if (std.ascii.eqlIgnoreCase(label, "full")) return colors.red;
+            if (std.ascii.eqlIgnoreCase(label, "work") or std.ascii.eqlIgnoreCase(label, "ext")) return colors.yellow;
+            if (std.ascii.eqlIgnoreCase(label, "ro")) return colors.green;
+        }
+    }
+
+    if (sandbox) |kind| {
+        if (std.ascii.eqlIgnoreCase(kind, "danger-full-access")) return colors.red;
+        if (std.ascii.eqlIgnoreCase(kind, "workspace-write")) return colors.yellow;
+        if (std.ascii.eqlIgnoreCase(kind, "external-sandbox")) return colors.yellow;
+        if (std.ascii.eqlIgnoreCase(kind, "read-only")) return colors.green;
+    }
+
+    if (approval) |policy| {
+        if (std.ascii.eqlIgnoreCase(policy, "never")) return colors.yellow;
+    }
+
+    return colors.green;
+}
+
+fn claudePermissionDisplay(mode: []const u8) PermissionDisplay {
+    if (std.ascii.eqlIgnoreCase(mode, "bypassPermissions")) {
+        return .{ .color = colors.red, .primary = "bypass" };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "acceptEdits")) {
+        return .{ .color = colors.yellow, .primary = "edits" };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "plan")) {
+        return .{ .color = colors.green, .primary = "plan" };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "default")) {
+        return .{ .color = colors.green, .primary = "default" };
+    }
+    return .{ .color = colors.yellow, .primary = mode };
+}
+
+fn codexDisplay(approval_policy: ?[]const u8, sandbox_kind: ?[]const u8, permissions: ?PermissionsInput) ?PermissionDisplay {
+    const approval = approvalLabel(approval_policy);
+    const sandbox = if (permissions) |perms| profileSandboxLabel(perms) else sandboxLabel(sandbox_kind);
+    if (approval == null and sandbox == null) return null;
+
+    return .{
+        .color = codexPermissionColor(approval_policy, sandbox_kind, permissions),
+        .primary = approval orelse sandbox.?,
+        .secondary = if (approval != null) sandbox else null,
+    };
+}
+
+fn permissionDisplay(input: StatuslineInput) ?PermissionDisplay {
+    const top_level_sandbox = sandboxPolicyKind(input.sandbox_policy);
+    const has_complete_top_level_codex_mode = input.approval_policy != null and top_level_sandbox != null;
+    if (has_complete_top_level_codex_mode) {
+        return codexDisplay(input.approval_policy, top_level_sandbox, null);
+    }
+
+    if (input.permissions) |permissions| {
+        if (codexDisplay(permissions.approval_policy, null, permissions)) |display| return display;
+    }
+
+    if (input.approval_policy != null or top_level_sandbox != null) {
+        return codexDisplay(input.approval_policy, top_level_sandbox, null);
+    }
+
+    if (input.permission_mode) |mode| {
+        // Hypothetical statusline support: this is not in Claude Code's
+        // documented statusLine schema, but it keeps this renderer compatible
+        // if a Claude producer supplies the same field seen in hook payloads.
+        return claudePermissionDisplay(mode);
+    }
+
+    return null;
+}
+
+fn formatPermissionMode(writer: anytype, input: StatuslineInput) !bool {
+    const display = permissionDisplay(input) orelse return false;
+
+    try writer.print(" {s}🛡{s}{s}", .{ display.color, colors.light_gray, display.primary });
+    if (display.secondary) |secondary| {
+        try writer.print("/{s}", .{secondary});
+    }
     try writer.writeAll(colors.reset);
     return true;
 }
@@ -1556,6 +1724,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     _ = try formatCodexGoal(&writer, input);
+    _ = try formatPermissionMode(&writer, input);
 
     // Add model display with gauge
     if (input.model) |model| {
@@ -2445,6 +2614,41 @@ test "JSON parsing with Codex active goal payload" {
     try std.testing.expectEqual(@as(i64, 120), goal.time_used_seconds.?);
 }
 
+test "JSON parsing with permission mode payloads" {
+    const allocator = std.testing.allocator;
+
+    const codex_json =
+        \\{
+        \\  "approval_policy": "never",
+        \\  "sandbox_policy": { "type": "danger-full-access" },
+        \\  "permissions": {
+        \\    "approval_policy": "on-request",
+        \\    "active_profile_id": ":workspace",
+        \\    "active_profile_extends": null,
+        \\    "file_system": "restricted",
+        \\    "network": "restricted",
+        \\    "enforcement": "managed",
+        \\    "yolo": false
+        \\  },
+        \\  "permission_mode": "default"
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(StatuslineInput, allocator, codex_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("never", parsed.value.approval_policy.?);
+    try std.testing.expectEqualStrings("danger-full-access", parsed.value.sandbox_policy.?.object.get("type").?.string);
+    try std.testing.expectEqualStrings("on-request", parsed.value.permissions.?.approval_policy.?);
+    try std.testing.expectEqualStrings(":workspace", parsed.value.permissions.?.active_profile_id.?);
+    try std.testing.expectEqualStrings("restricted", parsed.value.permissions.?.file_system.?);
+    try std.testing.expectEqualStrings("restricted", parsed.value.permissions.?.network.?);
+    try std.testing.expectEqual(false, parsed.value.permissions.?.yolo.?);
+    try std.testing.expectEqualStrings("default", parsed.value.permission_mode.?);
+}
+
 test "formatCodexGoal renders active token budget and hides inactive goals" {
     {
         var buf: [128]u8 = undefined;
@@ -2479,6 +2683,107 @@ test "formatCodexGoal renders active token budget and hides inactive goals" {
         try std.testing.expect(!result);
         try std.testing.expectEqualStrings("", writer.buffered());
     }
+}
+
+test "formatPermissionMode renders Codex risk badges and hides missing modes" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const result = try formatPermissionMode(&writer, StatuslineInput{});
+    try std.testing.expect(!result);
+    try std.testing.expectEqualStrings("", writer.buffered());
+}
+
+test "formatPermissionMode colors Codex and Claude modes" {
+    {
+        var buf: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+
+        const result = try formatPermissionMode(&writer, StatuslineInput{
+            .approval_policy = "never",
+            .sandbox_policy = json.Value{ .string = "danger-full-access" },
+        });
+        try std.testing.expect(result);
+
+        var expected_buf: [128]u8 = undefined;
+        var expected_writer = std.Io.Writer.fixed(&expected_buf);
+        try expected_writer.print(" {s}🛡{s}never/full{s}", .{ colors.red, colors.light_gray, colors.reset });
+        try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+    }
+
+    {
+        var buf: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+
+        const result = try formatPermissionMode(&writer, StatuslineInput{
+            .permissions = .{
+                .approval_policy = "on-request",
+                .active_profile_id = ":workspace",
+                .file_system = "restricted",
+                .network = "restricted",
+                .yolo = false,
+            },
+        });
+        try std.testing.expect(result);
+
+        var expected_buf: [128]u8 = undefined;
+        var expected_writer = std.Io.Writer.fixed(&expected_buf);
+        try expected_writer.print(" {s}🛡{s}ask/work{s}", .{ colors.yellow, colors.light_gray, colors.reset });
+        try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+    }
+
+    {
+        var buf: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+
+        const result = try formatPermissionMode(&writer, StatuslineInput{
+            .approval_policy = "on-request",
+            .sandbox_policy = json.Value{ .string = "read-only" },
+        });
+        try std.testing.expect(result);
+
+        var expected_buf: [128]u8 = undefined;
+        var expected_writer = std.Io.Writer.fixed(&expected_buf);
+        try expected_writer.print(" {s}🛡{s}ask/ro{s}", .{ colors.green, colors.light_gray, colors.reset });
+        try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+    }
+
+    {
+        var buf: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+
+        const result = try formatPermissionMode(&writer, StatuslineInput{
+            .permission_mode = "bypassPermissions",
+        });
+        try std.testing.expect(result);
+
+        var expected_buf: [128]u8 = undefined;
+        var expected_writer = std.Io.Writer.fixed(&expected_buf);
+        try expected_writer.print(" {s}🛡{s}bypass{s}", .{ colors.red, colors.light_gray, colors.reset });
+        try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+    }
+}
+
+test "formatPermissionMode does not let partial top-level Codex fields mask nested permissions" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const result = try formatPermissionMode(&writer, StatuslineInput{
+        .approval_policy = "on-request",
+        .permissions = .{
+            .approval_policy = "never",
+            .active_profile_id = ":danger-full-access",
+            .file_system = "unrestricted",
+            .network = "enabled",
+            .yolo = true,
+        },
+    });
+    try std.testing.expect(result);
+
+    var expected_buf: [128]u8 = undefined;
+    var expected_writer = std.Io.Writer.fixed(&expected_buf);
+    try expected_writer.print(" {s}🛡{s}never/full{s}", .{ colors.red, colors.light_gray, colors.reset });
+    try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
 }
 
 test "formatCodexGoal supports boolean active payloads without counters" {
