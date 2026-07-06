@@ -36,7 +36,7 @@ Unit tests are the objective oracle for parser and formatter behavior. A local s
 - `SessionStart` clears state for the session to avoid showing stale activity after reopening a session.
 - Working state does not time out in render mode; long autonomous turns remain working until `Stop`, and `updated_at` is kept for debugging.
 - The plugin locates the renderer through `AGENT_STATUSLINE_BIN`, `PATH`, or the repo-local build path.
-- Permission badges prefer Codex top-level approval/sandbox fields, then Codex nested `permissions`; top-level `permission_mode` is only a best-effort fallback for Claude-like payloads and is not treated as a documented Claude statusline contract.
+- Permission badges prefer explicit Codex nested `permissions.mode` when present; legacy top-level approval/sandbox and nested approval/profile derivation remain fallbacks. Top-level `permission_mode` is only a best-effort fallback for Claude-like payloads and is not treated as a documented Claude statusline contract.
 
 ## Boundary
 

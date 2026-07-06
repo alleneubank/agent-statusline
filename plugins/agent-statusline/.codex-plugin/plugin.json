@@ -7,7 +7,7 @@
     "url": "https://github.com/0xbigboss/agent-statusline"
   },
   "repository": "https://github.com/0xbigboss/agent-statusline",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "skills": "./skills",
   "license": "Apache-2.0",
   "keywords": [

@@ -72,7 +72,10 @@ const CodexGoal = struct {
 
 /// Permission snapshot emitted by Codex custom statusline payloads.
 const PermissionsInput = struct {
+    mode: ?[]const u8 = null,
+    label: ?[]const u8 = null,
     approval_policy: ?[]const u8 = null,
+    approvals_reviewer: ?[]const u8 = null,
     active_profile_id: ?[]const u8 = null,
     active_profile_extends: ?[]const u8 = null,
     file_system: ?[]const u8 = null,
@@ -747,6 +750,42 @@ fn claudePermissionDisplay(mode: []const u8) PermissionDisplay {
     return .{ .color = colors.yellow, .primary = mode };
 }
 
+fn codexExplicitPermissionDisplay(permissions: PermissionsInput) ?PermissionDisplay {
+    const mode = permissions.mode orelse return null;
+    if (mode.len == 0) return null;
+
+    if (std.ascii.eqlIgnoreCase(mode, "auto")) {
+        return .{ .color = colors.yellow, .primary = "auto" };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "ask")) {
+        return .{
+            .color = codexPermissionColor(permissions.approval_policy, null, permissions),
+            .primary = "ask",
+            .secondary = profileSandboxLabel(permissions),
+        };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "read-only") or std.ascii.eqlIgnoreCase(mode, "readonly")) {
+        return .{ .color = colors.green, .primary = "ro" };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "workspace-write") or
+        std.ascii.eqlIgnoreCase(mode, "workspace") or
+        std.ascii.eqlIgnoreCase(mode, "work"))
+    {
+        return .{ .color = colors.yellow, .primary = "work" };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "yolo") or
+        std.ascii.eqlIgnoreCase(mode, "full-access") or
+        std.ascii.eqlIgnoreCase(mode, "danger-full-access"))
+    {
+        return .{ .color = colors.red, .primary = "full" };
+    }
+
+    if (permissions.label) |label| {
+        if (label.len > 0) return .{ .color = colors.yellow, .primary = label };
+    }
+    return .{ .color = colors.yellow, .primary = mode };
+}
+
 fn codexDisplay(approval_policy: ?[]const u8, sandbox_kind: ?[]const u8, permissions: ?PermissionsInput) ?PermissionDisplay {
     const approval = approvalLabel(approval_policy);
     const sandbox = if (permissions) |perms| profileSandboxLabel(perms) else sandboxLabel(sandbox_kind);
@@ -760,6 +799,10 @@ fn codexDisplay(approval_policy: ?[]const u8, sandbox_kind: ?[]const u8, permiss
 }
 
 fn permissionDisplay(input: StatuslineInput) ?PermissionDisplay {
+    if (input.permissions) |permissions| {
+        if (codexExplicitPermissionDisplay(permissions)) |display| return display;
+    }
+
     const top_level_sandbox = sandboxPolicyKind(input.sandbox_policy);
     const has_complete_top_level_codex_mode = input.approval_policy != null and top_level_sandbox != null;
     if (has_complete_top_level_codex_mode) {
@@ -1498,6 +1541,31 @@ fn getGitHead(allocator: Allocator, io: std.Io, dir: []const u8) []const u8 {
     return execCommand(allocator, io, cmd, dir) catch "";
 }
 
+fn appendBufferedReader(reader: *std.Io.Reader, dest: []u8, len: *usize) bool {
+    const buffered = reader.buffered();
+    if (buffered.len == 0) return false;
+
+    const remaining = dest.len - len.*;
+    const copied = @min(remaining, buffered.len);
+    if (copied > 0) {
+        @memcpy(dest[len.*..][0..copied], buffered[0..copied]);
+        len.* += copied;
+    }
+
+    // The statusline only retains bounded output, but it must continue
+    // draining the child pipe so a noisy child cannot block the render.
+    reader.seek = reader.end;
+    return true;
+}
+
+fn rlSegmentShouldRender(term: std.process.Child.Term, stderr_seen: bool, stdout_len: usize) bool {
+    if (stderr_seen or stdout_len == 0) return false;
+    return switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
+
 /// Delegate the rl loop segment to `rl statusline`.
 ///
 /// Covered by live smoke rather than a fake-PATH unit test: adding test-only PATH
@@ -1534,38 +1602,48 @@ fn renderRlStatusline(
         .argv = argv_buf[0..argc],
         .stdin = .ignore,
         .stdout = .pipe,
-        .stderr = .ignore,
+        .stderr = .pipe,
     }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return,
     };
-    errdefer child.kill(io);
-
-    const stdout = child.stdout orelse {
-        _ = child.wait(io) catch {};
-        return;
-    };
+    var child_done = false;
+    defer if (!child_done) child.kill(io);
 
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_reader = stdout.readerStreaming(io, &.{});
-    const stdout_stream = &stdout_reader.interface;
     var stdout_len: usize = 0;
-    while (stdout_len < stdout_buf.len) {
-        const bytes_read = stdout_stream.readSliceShort(stdout_buf[stdout_len..]) catch break;
-        if (bytes_read == 0) break;
-        stdout_len += bytes_read;
+    var stderr_buf: [256]u8 = undefined;
+    var stderr_len: usize = 0;
+    var stderr_seen = false;
+
+    if (child.stdout == null or child.stderr == null) {
+        const term = child.wait(io) catch return;
+        child_done = true;
+        if (!rlSegmentShouldRender(term, true, 0)) return;
     }
 
-    if (stdout_len == stdout_buf.len) {
-        var discard_buf: [256]u8 = undefined;
-        while (true) {
-            const bytes_read = stdout_stream.readSliceShort(&discard_buf) catch break;
-            if (bytes_read == 0) break;
-        }
-    }
+    var streams_storage: std.Io.File.MultiReader.Buffer(2) = undefined;
+    const streams = streams_storage.toStreams();
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    const files = [_]std.Io.File{ child.stdout.?, child.stderr.? };
+    multi_reader.init(std.heap.page_allocator, io, streams, &files);
+    defer multi_reader.deinit();
 
-    _ = child.wait(io) catch {};
-    if (stdout_len == 0) return;
+    while (true) {
+        multi_reader.fill(1, .none) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => break,
+        };
+
+        _ = appendBufferedReader(multi_reader.reader(0), &stdout_buf, &stdout_len);
+        stderr_seen = appendBufferedReader(multi_reader.reader(1), &stderr_buf, &stderr_len) or stderr_seen;
+    }
+    _ = appendBufferedReader(multi_reader.reader(0), &stdout_buf, &stdout_len);
+    stderr_seen = appendBufferedReader(multi_reader.reader(1), &stderr_buf, &stderr_len) or stderr_seen;
+
+    const term = child.wait(io) catch return;
+    child_done = true;
+    if (!rlSegmentShouldRender(term, stderr_seen, stdout_len)) return;
 
     try writer.writeByte(' ');
     try writer.writeAll(stdout_buf[0..stdout_len]);
@@ -2622,7 +2700,10 @@ test "JSON parsing with permission mode payloads" {
         \\  "approval_policy": "never",
         \\  "sandbox_policy": { "type": "danger-full-access" },
         \\  "permissions": {
+        \\    "mode": "auto",
+        \\    "label": "Auto",
         \\    "approval_policy": "on-request",
+        \\    "approvals_reviewer": "auto_review",
         \\    "active_profile_id": ":workspace",
         \\    "active_profile_extends": null,
         \\    "file_system": "restricted",
@@ -2641,7 +2722,10 @@ test "JSON parsing with permission mode payloads" {
 
     try std.testing.expectEqualStrings("never", parsed.value.approval_policy.?);
     try std.testing.expectEqualStrings("danger-full-access", parsed.value.sandbox_policy.?.object.get("type").?.string);
+    try std.testing.expectEqualStrings("auto", parsed.value.permissions.?.mode.?);
+    try std.testing.expectEqualStrings("Auto", parsed.value.permissions.?.label.?);
     try std.testing.expectEqualStrings("on-request", parsed.value.permissions.?.approval_policy.?);
+    try std.testing.expectEqualStrings("auto_review", parsed.value.permissions.?.approvals_reviewer.?);
     try std.testing.expectEqualStrings(":workspace", parsed.value.permissions.?.active_profile_id.?);
     try std.testing.expectEqualStrings("restricted", parsed.value.permissions.?.file_system.?);
     try std.testing.expectEqualStrings("restricted", parsed.value.permissions.?.network.?);
@@ -2708,6 +2792,30 @@ test "formatPermissionMode colors Codex and Claude modes" {
         var expected_buf: [128]u8 = undefined;
         var expected_writer = std.Io.Writer.fixed(&expected_buf);
         try expected_writer.print(" {s}🛡{s}never/full{s}", .{ colors.red, colors.light_gray, colors.reset });
+        try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+    }
+
+    {
+        var buf: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+
+        const result = try formatPermissionMode(&writer, StatuslineInput{
+            .permissions = .{
+                .mode = "auto",
+                .label = "Auto",
+                .approval_policy = "on-request",
+                .approvals_reviewer = "auto_review",
+                .active_profile_id = ":workspace",
+                .file_system = "restricted",
+                .network = "restricted",
+                .yolo = false,
+            },
+        });
+        try std.testing.expect(result);
+
+        var expected_buf: [128]u8 = undefined;
+        var expected_writer = std.Io.Writer.fixed(&expected_buf);
+        try expected_writer.print(" {s}🛡{s}auto{s}", .{ colors.yellow, colors.light_gray, colors.reset });
         try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
     }
 
@@ -2837,6 +2945,14 @@ test "formatCodexGoal renders zero used tokens when present without budget" {
     var expected_writer = std.Io.Writer.fixed(&expected_buf);
     try expected_writer.print(" {s}🎯{s}0{s}", .{ colors.yellow, colors.light_gray, colors.reset });
     try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+}
+
+test "rl segment renders only on clean successful stdout" {
+    try std.testing.expect(rlSegmentShouldRender(.{ .exited = 0 }, false, 1));
+    try std.testing.expect(!rlSegmentShouldRender(.{ .exited = 1 }, false, 1));
+    try std.testing.expect(!rlSegmentShouldRender(.{ .signal = .TERM }, false, 1));
+    try std.testing.expect(!rlSegmentShouldRender(.{ .exited = 0 }, true, 1));
+    try std.testing.expect(!rlSegmentShouldRender(.{ .exited = 0 }, false, 0));
 }
 
 test "current_usage field fallback when missing" {
