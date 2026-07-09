@@ -15,7 +15,7 @@ A fast, single-line status renderer for command-backed agent statusline payloads
   without changing visible output.
 - `STATUSLINE_CAPTURE_DIR=/absolute/dir` writes replay artifacts for every render:
   `statusline-*.input.json` and `statusline-*.output.ansi`.
-- Claude Code and Codex-style status payloads are supported. Claude models render with their existing glyphs; recommended Codex models render with model-specific glyphs (`gpt-5.5` 🧠, `gpt-5.4` 🔧, `gpt-5.4-mini` ⚡, `gpt-5.3-codex-spark` ✨), with `⌘` as the generic GPT/Codex fallback.
+- Claude Code and Codex-style status payloads are supported. Claude models render with their existing glyphs; the GPT-5.6 family renders with model-specific glyphs (`gpt-5.6-sol` ☀️, `gpt-5.6-terra` 🌍, `gpt-5.6-luna` 🌙). Previous-generation Codex glyphs remain supported, with `⌘` as the generic GPT/Codex fallback.
 - Codex goal payloads render active goal attention as `🎯`; when `tokens_used` and `token_budget` are present, the segment renders compact progress such as `🎯12.5k/50k`.
 - Activity display is hook-owned: the `agent-statusline` plugin records `UserPromptSubmit` as `💬 MM/DD HH:MM` and `Stop` as `💤 MM/DD HH:MM` under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
 

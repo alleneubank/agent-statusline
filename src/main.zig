@@ -128,6 +128,9 @@ const ModelType = enum {
     sonnet,
     haiku,
     fable,
+    gpt56_sol,
+    gpt56_terra,
+    gpt56_luna,
     gpt55,
     gpt54,
     gpt54_mini,
@@ -140,6 +143,9 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "Sonnet")) return .sonnet;
         if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
         if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
+        if (asciiContainsIgnoreCase(name, "gpt-5.6-sol")) return .gpt56_sol;
+        if (asciiContainsIgnoreCase(name, "gpt-5.6-terra")) return .gpt56_terra;
+        if (asciiContainsIgnoreCase(name, "gpt-5.6-luna")) return .gpt56_luna;
         if (asciiContainsIgnoreCase(name, "gpt-5.3-codex-spark")) return .gpt53_codex_spark;
         if (asciiContainsIgnoreCase(name, "gpt-5.4-mini")) return .gpt54_mini;
         if (asciiContainsIgnoreCase(name, "gpt-5.5")) return .gpt55;
@@ -158,6 +164,9 @@ const ModelType = enum {
             .sonnet => "📜",
             .haiku => "🍃",
             .fable => "🦊",
+            .gpt56_sol => "☀️",
+            .gpt56_terra => "🌍",
+            .gpt56_luna => "🌙",
             .gpt55 => "🧠",
             .gpt54 => "🔧",
             .gpt54_mini => "⚡",
@@ -1897,6 +1906,10 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable 5"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable"));
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
+    try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("GPT-5.6-Sol"));
+    try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("gpt-5.6-sol xhigh"));
+    try std.testing.expectEqual(ModelType.gpt56_terra, ModelType.fromName("gpt-5.6-terra medium"));
+    try std.testing.expectEqual(ModelType.gpt56_luna, ModelType.fromName("gpt-5.6-luna"));
     try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName("GPT-5.5"));
     try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName("gpt-5.5 high"));
     try std.testing.expectEqual(ModelType.gpt54, ModelType.fromName("gpt-5.4"));
@@ -1911,6 +1924,9 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("📜", ModelType.sonnet.emoji());
     try std.testing.expectEqualStrings("🍃", ModelType.haiku.emoji());
     try std.testing.expectEqualStrings("🦊", ModelType.fable.emoji());
+    try std.testing.expectEqualStrings("☀️", ModelType.gpt56_sol.emoji());
+    try std.testing.expectEqualStrings("🌍", ModelType.gpt56_terra.emoji());
+    try std.testing.expectEqualStrings("🌙", ModelType.gpt56_luna.emoji());
     try std.testing.expectEqualStrings("🧠", ModelType.gpt55.emoji());
     try std.testing.expectEqualStrings("🔧", ModelType.gpt54.emoji());
     try std.testing.expectEqualStrings("⚡", ModelType.gpt54_mini.emoji());
@@ -2632,15 +2648,15 @@ test "JSON parsing with Codex used_percentage field" {
         \\  "hook_event_name": "Status",
         \\  "session_id": "codex-session",
         \\  "model": {
-        \\    "id": "gpt-5.5",
-        \\    "display_name": "gpt-5.5 high"
+        \\    "id": "gpt-5.6-sol",
+        \\    "display_name": "gpt-5.6-sol xhigh"
         \\  },
         \\  "workspace": {
         \\    "current_dir": "/Users/allen/0xbigboss/openai/codex-custom-statusline",
         \\    "project_dir": "/Users/allen/0xbigboss/openai/codex-custom-statusline"
         \\  },
         \\  "context_window": {
-        \\    "context_window_size": 272000,
+        \\    "context_window_size": 372000,
         \\    "used_percentage": 52,
         \\    "current_usage": {
         \\      "input_tokens": 10,
@@ -2657,7 +2673,7 @@ test "JSON parsing with Codex used_percentage field" {
     });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName(parsed.value.model.?.display_name.?));
+    try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName(parsed.value.model.?.display_name.?));
     try std.testing.expectEqual(@as(f64, 52.0), parsed.value.context_window.?.used_percentage.?);
     try std.testing.expectEqual(@as(i64, 15), parsed.value.context_window.?.current_usage.?.totalTokens());
 }
