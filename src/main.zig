@@ -217,16 +217,21 @@ const EffortLevel = enum {
         return null;
     }
 
-    /// Compact badge label; full words would crowd the line.
-    fn label(self: EffortLevel) []const u8 {
+    /// Single-character height meter: more fill = more effort, so the tier
+    /// reads even without decoding the color. Lower-block glyphs
+    /// (U+2581..U+2588) — deliberately distinct from the context gauge's
+    /// left-fill eighth blocks, and positioned after the model glyph while
+    /// the gauge sits before it. ▃ is skipped to keep a visible step
+    /// between low and medium.
+    fn meter(self: EffortLevel) []const u8 {
         return switch (self) {
-            .minimal => "min",
-            .low => "low",
-            .medium => "med",
-            .high => "high",
-            .xhigh => "xhigh",
-            .max => "max",
-            .ultra => "ultra",
+            .minimal => "▁",
+            .low => "▂",
+            .medium => "▄",
+            .high => "▅",
+            .xhigh => "▆",
+            .max => "▇",
+            .ultra => "█",
         };
     }
 
@@ -262,7 +267,7 @@ fn resolveEffort(input: StatuslineInput) ?EffortLevel {
 
 fn formatEffort(writer: anytype, input: StatuslineInput) !bool {
     const level = resolveEffort(input) orelse return false;
-    try writer.print(" 💭{s}{s}{s}", .{ level.color(), level.label(), colors.reset });
+    try writer.print("{s}{s}{s}", .{ level.color(), level.meter(), colors.reset });
     return true;
 }
 
@@ -1938,7 +1943,7 @@ pub fn main(init: std.process.Init) !void {
             }
             try writer.print(" {s}{s}", .{ model_type.emoji(), colors.gray });
 
-            // Reasoning effort rides with the model glyph it applies to
+            // Effort meter attaches directly to the model glyph it grades
             _ = try formatEffort(&writer, input);
 
             // Duration (space-separated, no bullets)
@@ -2077,13 +2082,23 @@ test "resolveEffort prefers structured effort over display name" {
     try std.testing.expect(resolveEffort(StatuslineInput{}) == null);
 }
 
-test "formatEffort renders tier-colored badge" {
+test "EffortLevel meter heights rise with effort" {
+    try std.testing.expectEqualStrings("▁", EffortLevel.minimal.meter());
+    try std.testing.expectEqualStrings("▂", EffortLevel.low.meter());
+    try std.testing.expectEqualStrings("▄", EffortLevel.medium.meter());
+    try std.testing.expectEqualStrings("▅", EffortLevel.high.meter());
+    try std.testing.expectEqualStrings("▆", EffortLevel.xhigh.meter());
+    try std.testing.expectEqualStrings("▇", EffortLevel.max.meter());
+    try std.testing.expectEqualStrings("█", EffortLevel.ultra.meter());
+}
+
+test "formatEffort renders single-character tier-colored meter" {
     var buf: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
     const rendered = try formatEffort(&writer, .{ .effort = .{ .level = "high" } });
     try std.testing.expect(rendered);
     try std.testing.expectEqualStrings(
-        " 💭" ++ colors.yellow ++ "high" ++ colors.reset,
+        colors.yellow ++ "▅" ++ colors.reset,
         writer.buffered(),
     );
 }
