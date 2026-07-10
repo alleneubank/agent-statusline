@@ -14,5 +14,11 @@
   "version": "1.0.0",
   "output_style": {
     "name": "default"
+  },
+  "effort": {
+    "level": "high"
+  },
+  "thinking": {
+    "enabled": true
   }
 }

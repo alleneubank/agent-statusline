@@ -94,6 +94,11 @@ const StatuslineInput = struct {
         id: ?[]const u8 = null,
         display_name: ?[]const u8 = null,
     } = null,
+    // Claude Code statusline schema: absent when the model has no effort
+    // parameter; reflects live mid-session /effort changes.
+    effort: ?struct {
+        level: ?[]const u8 = null,
+    } = null,
     session_id: ?[]const u8 = null,
     transcript_path: ?[]const u8 = null,
     version: ?[]const u8 = null,
@@ -176,6 +181,90 @@ const ModelType = enum {
         };
     }
 };
+
+/// Reasoning effort tiers shared across producers. Claude Code sends a
+/// structured `effort.level`; Codex embeds the same lowercase token in
+/// `model.display_name` ("gpt-5.6-sol xhigh"). "none"/"default" mean effort
+/// is unset upstream, so they hide the badge instead of rendering noise.
+const EffortLevel = enum {
+    minimal,
+    low,
+    medium,
+    high,
+    xhigh,
+    max,
+    ultra,
+
+    /// Case-insensitive exact match against a single label token.
+    fn fromLabel(text: []const u8) ?EffortLevel {
+        inline for (@typeInfo(EffortLevel).@"enum".fields) |field| {
+            if (std.ascii.eqlIgnoreCase(text, field.name)) {
+                return @field(EffortLevel, field.name);
+            }
+        }
+        return null;
+    }
+
+    /// Scan whitespace-separated display-name tokens for an effort label.
+    /// Codex model-with-reasoning names are "{model} {effort}[ {tier}]", so
+    /// the effort token is not necessarily last; hyphenated model parts
+    /// ("gpt-5.6-luna") never match because only whole tokens are compared.
+    fn fromDisplayName(name: []const u8) ?EffortLevel {
+        var tokens = std.mem.tokenizeScalar(u8, name, ' ');
+        while (tokens.next()) |token| {
+            if (fromLabel(token)) |level| return level;
+        }
+        return null;
+    }
+
+    /// Compact badge label; full words would crowd the line.
+    fn label(self: EffortLevel) []const u8 {
+        return switch (self) {
+            .minimal => "min",
+            .low => "low",
+            .medium => "med",
+            .high => "high",
+            .xhigh => "xhigh",
+            .max => "max",
+            .ultra => "ultra",
+        };
+    }
+
+    /// Graded by compute burn (which tracks cost): dim at the bottom of the
+    /// dial, hot at the top. Distinct from the permission badge's risk scale.
+    fn color(self: EffortLevel) []const u8 {
+        return switch (self) {
+            .minimal, .low => colors.gray,
+            .medium => colors.light_gray,
+            .high => colors.yellow,
+            .xhigh => colors.orange,
+            .max, .ultra => colors.red,
+        };
+    }
+};
+
+/// Structured `effort.level` (Claude Code) is authoritative when it parses;
+/// the display-name scan (Codex) is the fallback. Unknown labels fall through
+/// so the badge hides rather than guessing a tier color.
+fn resolveEffort(input: StatuslineInput) ?EffortLevel {
+    if (input.effort) |effort| {
+        if (effort.level) |level| {
+            if (EffortLevel.fromLabel(level)) |resolved| return resolved;
+        }
+    }
+    if (input.model) |model| {
+        if (model.display_name) |name| {
+            if (EffortLevel.fromDisplayName(name)) |resolved| return resolved;
+        }
+    }
+    return null;
+}
+
+fn formatEffort(writer: anytype, input: StatuslineInput) !bool {
+    const level = resolveEffort(input) orelse return false;
+    try writer.print(" 💭{s}{s}{s}", .{ level.color(), level.label(), colors.reset });
+    return true;
+}
 
 /// Configuration for gauge display
 const GaugeConfig = struct {
@@ -1849,6 +1938,9 @@ pub fn main(init: std.process.Init) !void {
             }
             try writer.print(" {s}{s}", .{ model_type.emoji(), colors.gray });
 
+            // Reasoning effort rides with the model glyph it applies to
+            _ = try formatEffort(&writer, input);
+
             // Duration (space-separated, no bullets)
             if (input.cost != null and input.cost.?.total_duration_ms != null) {
                 try writer.print(" {s}", .{colors.light_gray});
@@ -1933,6 +2025,97 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("✨", ModelType.gpt53_codex_spark.emoji());
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
+}
+
+test "EffortLevel fromLabel" {
+    try std.testing.expectEqual(EffortLevel.xhigh, EffortLevel.fromLabel("xhigh").?);
+    try std.testing.expectEqual(EffortLevel.medium, EffortLevel.fromLabel("medium").?);
+    // Producers send lowercase today; stay case-insensitive for safety
+    try std.testing.expectEqual(EffortLevel.max, EffortLevel.fromLabel("MAX").?);
+    // Unset-effort labels hide the badge
+    try std.testing.expect(EffortLevel.fromLabel("none") == null);
+    try std.testing.expect(EffortLevel.fromLabel("default") == null);
+    // Exact token only — no prefix/substring matches
+    try std.testing.expect(EffortLevel.fromLabel("higher") == null);
+    try std.testing.expect(EffortLevel.fromLabel("") == null);
+}
+
+test "EffortLevel fromDisplayName scans Codex model-with-reasoning names" {
+    try std.testing.expectEqual(EffortLevel.xhigh, EffortLevel.fromDisplayName("gpt-5.6-sol xhigh").?);
+    try std.testing.expectEqual(EffortLevel.medium, EffortLevel.fromDisplayName("gpt-5.6-terra medium").?);
+    // Service-tier suffix after the effort token must not confuse the scan
+    try std.testing.expectEqual(EffortLevel.high, EffortLevel.fromDisplayName("gpt-5.5 high priority").?);
+    // Hyphenated model parts are one token; "luna" must not match "low" etc.
+    try std.testing.expect(EffortLevel.fromDisplayName("gpt-5.6-luna") == null);
+    try std.testing.expect(EffortLevel.fromDisplayName("Fable 5") == null);
+    // Codex renders unset effort as "default"; badge stays hidden
+    try std.testing.expect(EffortLevel.fromDisplayName("gpt-5.6-sol default") == null);
+    try std.testing.expect(EffortLevel.fromDisplayName("") == null);
+}
+
+test "resolveEffort prefers structured effort over display name" {
+    const structured = StatuslineInput{
+        .effort = .{ .level = "max" },
+        .model = .{ .display_name = "gpt-5.6-sol xhigh" },
+    };
+    try std.testing.expectEqual(EffortLevel.max, resolveEffort(structured).?);
+
+    const display_only = StatuslineInput{
+        .model = .{ .display_name = "gpt-5.6-sol xhigh" },
+    };
+    try std.testing.expectEqual(EffortLevel.xhigh, resolveEffort(display_only).?);
+
+    // Unknown structured label falls through to the display-name scan
+    const unknown_structured = StatuslineInput{
+        .effort = .{ .level = "experimental" },
+        .model = .{ .display_name = "gpt-5.6-terra medium" },
+    };
+    try std.testing.expectEqual(EffortLevel.medium, resolveEffort(unknown_structured).?);
+
+    const unsupported = StatuslineInput{ .model = .{ .display_name = "Opus" } };
+    try std.testing.expect(resolveEffort(unsupported) == null);
+    try std.testing.expect(resolveEffort(StatuslineInput{}) == null);
+}
+
+test "formatEffort renders tier-colored badge" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    const rendered = try formatEffort(&writer, .{ .effort = .{ .level = "high" } });
+    try std.testing.expect(rendered);
+    try std.testing.expectEqualStrings(
+        " 💭" ++ colors.yellow ++ "high" ++ colors.reset,
+        writer.buffered(),
+    );
+}
+
+test "formatEffort hides when effort is unavailable" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    const rendered = try formatEffort(&writer, .{});
+    try std.testing.expect(!rendered);
+    try std.testing.expectEqualStrings("", writer.buffered());
+}
+
+test "JSON parsing with effort payload" {
+    const allocator = std.testing.allocator;
+
+    // Claude Code shape: structured effort plus a thinking field the
+    // renderer ignores (I-6 unknown-field tolerance).
+    const claude_json =
+        \\{
+        \\  "model": { "id": "claude-fable-5", "display_name": "Fable 5" },
+        \\  "effort": { "level": "xhigh" },
+        \\  "thinking": { "enabled": true }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(StatuslineInput, allocator, claude_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("xhigh", parsed.value.effort.?.level.?);
+    try std.testing.expectEqual(EffortLevel.xhigh, resolveEffort(parsed.value).?);
 }
 
 test "ContextUsage color thresholds" {

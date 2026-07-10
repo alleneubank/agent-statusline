@@ -40,7 +40,7 @@ stdin (JSON StatuslineInput)
 │  host/session@ prefix  (gethostname + $ZMX_SESSION)  │
 │  path + branch + git-status                          │
 │  rl loop segment       (from `rl statusline`)        │
-│  model + gauge + usage + cost + duration + lines     │
+│  model + gauge + effort + cost + duration + lines    │
 │  activity time         (hook-owned neutral state)            │
 └──────┬───────────────────────────────────────────────┘
        │
@@ -54,6 +54,7 @@ stdin (JSON StatuslineInput)
 - `ActivityState` — hook-owned per-session state containing `working` / `idle`, `last_prompt_at`, `idle_since`, and `updated_at`. It lets the renderer show prompt and idle transitions without requiring producer statusline payload changes.
 - `ContextUsage` — `{ percentage, total_tokens }`. Renders a 5-char, 40-step eighth-block gauge with an RGB gradient (green → yellow → red).
 - `ModelType` — `opus | sonnet | haiku | fable | gpt56_sol | gpt56_terra | gpt56_luna | gpt55 | gpt54 | gpt54_mini | gpt53_codex_spark | codex | unknown`. Drives the model glyph (`🎭📜🍃🦊☀️🌍🌙🧠🔧⚡✨⌘?`).
+- `EffortLevel` — `minimal | low | medium | high | xhigh | max | ultra`. Resolved from the structured Claude Code `effort.level` field first, then from a whole-token scan of the Codex model-with-reasoning `model.display_name`. Drives the `💭` badge.
 - `CodexGoal` — optional producer-provided goal snapshot containing `objective`, `status`, `token_budget`, `tokens_used`, and `time_used_seconds`. Only active goals render.
 - `PermissionsInput` — optional Codex permission snapshot containing explicit `mode` / `label`, `approval_policy`, approval reviewer, active profile identity, filesystem/network labels, enforcement, and `yolo`. The renderer also accepts top-level Codex `approval_policy` / `sandbox_policy` fields and a best-effort `permission_mode` compatibility fallback for Claude-like producers.
 - `GitStatus` — `{ added, modified, deleted, untracked }`. Parsed from `git status --porcelain`.
@@ -175,6 +176,7 @@ Historical context only. The statusline no longer parses this schema directly; `
 - **REQ-SL-054**: Activity indicator is hook-owned. `UserPromptSubmit` writes `working` with `last_prompt_at` and renders as `💬{MM/DD HH:MM}`. `Stop` writes `idle` with `idle_since` and renders as `💤{MM/DD HH:MM}`. `SessionStart` clears state for that session. Render mode never infers activity from raw statusline payload changes and does not time out `working` state; long autonomous turns remain working until a lifecycle hook changes the state. `updated_at` is diagnostic metadata for state inspection.
 - **REQ-SL-059**: Codex goal attention renders only when `input.goal.status == "active"` or `input.goal.active == true`. The segment is `🎯active` when no counters exist, `🎯{tokens_used}` when only `tokens_used` exists, and `🎯{tokens_used}/{token_budget}` when both counters exist. Counts use compact `k`/`M` suffixes. Non-active, absent, or null goal payloads hide the segment.
 - **REQ-SL-060**: Permission mode renders when Codex permission fields are present. Codex nested `permissions.mode` is authoritative when present, with compact labels such as `auto`, `ask/work`, `ro`, or `full`; `permissions.label` is used only for unknown explicit modes. Without an explicit nested mode, Codex top-level `approval_policy` plus `sandbox_policy` wins when present; otherwise legacy Codex nested `approval_policy` plus profile/filesystem data is derived. If neither Codex shape exists, the renderer accepts top-level `permission_mode` as an undocumented compatibility fallback for Claude-like producers and hook-shaped payloads. The segment is a shield badge. Read-only/default modes are green, auto/workspace-write/edit modes are yellow, and full-access/bypass modes are red. Missing permission data hides the segment.
+- **REQ-SL-090**: Reasoning-effort badge. The effort tier resolves from the structured `effort.level` field first (Claude Code statusline schema; sent as lowercase `low`/`medium`/`high`/`xhigh`/`max`, absent when the model has no effort parameter, live-updated on mid-session `/effort` changes). When the structured field is absent or its label is unknown, the tier resolves from a case-insensitive whole-token scan of `model.display_name` (Codex custom statusline payloads embed the model-with-reasoning label, e.g. `gpt-5.6-sol xhigh`, optionally followed by a service-tier word). Recognized tiers: `minimal`/`low`/`medium`/`high`/`xhigh`/`max`/`ultra`. The badge renders as ` 💭{label}` immediately after the model glyph with compact labels (`min`/`low`/`med`/`high`/`xhigh`/`max`/`ultra`) and compute-burn color grading (minimal/low gray, medium light-gray, high yellow, xhigh orange, max/ultra red). Codex's unset-effort labels (`none`, `default`), unknown labels, and absent data hide the badge (I-7). Resolution adds no subprocesses and no file reads; both sources come from the stdin payload only.
 - **REQ-SL-057**: State location is neutral and overrideable. `STATUSLINE_STATE_DIR=/absolute/dir` wins when set. Otherwise `XDG_STATE_HOME/agent-statusline` is used when `XDG_STATE_HOME` is absolute. Otherwise the fallback is `~/.local/state/agent-statusline`. Missing or unwritable state directories fail open by hiding only the activity indicator.
 - **REQ-SL-058**: The bundled `agent-statusline` plugin provides the activity hooks for both Claude Code and Codex CLI. The hook wrapper locates the renderer through `AGENT_STATUSLINE_BIN`, `statusline` on `PATH`, or the repo-local build path.
 
@@ -229,6 +231,15 @@ Hook-backed activity cutover (this change set — 2026-06-28):
 - [x] Render mode displays prompt and idle timestamps from explicit activity state.
 - [x] Bundled plugin contains Codex and Claude manifests, hook wiring, marketplace metadata, and setup skill.
 - [x] `zig build test` passes.
+
+Reasoning-effort badge (this change set — 2026-07-10):
+
+- [x] `StatuslineInput` gains the optional `effort.level` field; unknown sibling fields (e.g. `thinking`) remain ignored.
+- [x] `EffortLevel` enum with `fromLabel` (case-insensitive exact token) and `fromDisplayName` (whitespace-token scan) per REQ-SL-090.
+- [x] Structured-field-over-display-name precedence covered by `resolveEffort` tests, including unknown-structured-label fall-through.
+- [x] Badge renders after the model glyph; hidden for `none`/`default`/unknown/absent effort.
+- [x] Tests observed red against stubbed scanners before implementation (5 failing/crashing), then `zig build test` green at 57/57.
+- [x] Fixture smoke: `test/codex.json` renders orange `xhigh` from display name, `test/codex-goal.json` renders dim `med`, `test/opus.json` renders yellow `high` from the structured field.
 
 ## Risk tags
 
