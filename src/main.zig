@@ -217,33 +217,24 @@ const EffortLevel = enum {
         return null;
     }
 
-    /// Single-character height meter: more fill = more effort, so the tier
-    /// reads even without decoding the color. Lower-block glyphs
-    /// (U+2581..U+2588) — deliberately distinct from the context gauge's
-    /// left-fill eighth blocks, and positioned after the model glyph while
-    /// the gauge sits before it. ▃ is skipped to keep a visible step
-    /// between low and medium.
+    /// Emoji dot dial graded by compute burn: dim at the bottom, hot at the
+    /// top, purple past the redline. Emoji rather than a text glyph because
+    /// the badge sits directly after the emoji model glyph: two emoji share
+    /// the same vertical box and align, while partial-height blocks anchor
+    /// to the cell floor and read as floating next to baseline-bound
+    /// neighbors, and left-fill blocks read as a stray context-gauge cell.
+    /// The dot carries its own color, so no ANSI grading is applied; it
+    /// renders two columns wide. All codepoints are default emoji
+    /// presentation (no VS16), so width is stable across terminals.
     fn meter(self: EffortLevel) []const u8 {
         return switch (self) {
-            .minimal => "▁",
-            .low => "▂",
-            .medium => "▄",
-            .high => "▅",
-            .xhigh => "▆",
-            .max => "▇",
-            .ultra => "█",
-        };
-    }
-
-    /// Graded by compute burn (which tracks cost): dim at the bottom of the
-    /// dial, hot at the top. Distinct from the permission badge's risk scale.
-    fn color(self: EffortLevel) []const u8 {
-        return switch (self) {
-            .minimal, .low => colors.gray,
-            .medium => colors.light_gray,
-            .high => colors.yellow,
-            .xhigh => colors.orange,
-            .max, .ultra => colors.red,
+            .minimal => "⚫",
+            .low => "⚪",
+            .medium => "🔵",
+            .high => "🟡",
+            .xhigh => "🟠",
+            .max => "🔴",
+            .ultra => "🟣",
         };
     }
 };
@@ -267,7 +258,7 @@ fn resolveEffort(input: StatuslineInput) ?EffortLevel {
 
 fn formatEffort(writer: anytype, input: StatuslineInput) !bool {
     const level = resolveEffort(input) orelse return false;
-    try writer.print("{s}{s}{s}", .{ level.color(), level.meter(), colors.reset });
+    try writer.writeAll(level.meter());
     return true;
 }
 
@@ -1941,7 +1932,7 @@ pub fn main(init: std.process.Init) !void {
             if (debug_mode) {
                 try writer.print(" {s}{d:.1}%", .{ colors.gray, usage.percentage });
             }
-            try writer.print(" {s}{s}", .{ model_type.emoji(), colors.gray });
+            try writer.print(" {s}", .{model_type.emoji()});
 
             // Effort meter attaches directly to the model glyph it grades
             _ = try formatEffort(&writer, input);
@@ -2082,25 +2073,22 @@ test "resolveEffort prefers structured effort over display name" {
     try std.testing.expect(resolveEffort(StatuslineInput{}) == null);
 }
 
-test "EffortLevel meter heights rise with effort" {
-    try std.testing.expectEqualStrings("▁", EffortLevel.minimal.meter());
-    try std.testing.expectEqualStrings("▂", EffortLevel.low.meter());
-    try std.testing.expectEqualStrings("▄", EffortLevel.medium.meter());
-    try std.testing.expectEqualStrings("▅", EffortLevel.high.meter());
-    try std.testing.expectEqualStrings("▆", EffortLevel.xhigh.meter());
-    try std.testing.expectEqualStrings("▇", EffortLevel.max.meter());
-    try std.testing.expectEqualStrings("█", EffortLevel.ultra.meter());
+test "EffortLevel meter dots heat up with effort" {
+    try std.testing.expectEqualStrings("⚫", EffortLevel.minimal.meter());
+    try std.testing.expectEqualStrings("⚪", EffortLevel.low.meter());
+    try std.testing.expectEqualStrings("🔵", EffortLevel.medium.meter());
+    try std.testing.expectEqualStrings("🟡", EffortLevel.high.meter());
+    try std.testing.expectEqualStrings("🟠", EffortLevel.xhigh.meter());
+    try std.testing.expectEqualStrings("🔴", EffortLevel.max.meter());
+    try std.testing.expectEqualStrings("🟣", EffortLevel.ultra.meter());
 }
 
-test "formatEffort renders single-character tier-colored meter" {
+test "formatEffort renders tier dot without ANSI escapes" {
     var buf: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
     const rendered = try formatEffort(&writer, .{ .effort = .{ .level = "high" } });
     try std.testing.expect(rendered);
-    try std.testing.expectEqualStrings(
-        colors.yellow ++ "▅" ++ colors.reset,
-        writer.buffered(),
-    );
+    try std.testing.expectEqualStrings("🟡", writer.buffered());
 }
 
 test "formatEffort hides when effort is unavailable" {
