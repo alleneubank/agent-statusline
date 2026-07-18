@@ -141,6 +141,7 @@ const ModelType = enum {
     gpt54_mini,
     gpt53_codex_spark,
     codex,
+    kimi,
     unknown,
 
     fn fromName(name: []const u8) ModelType {
@@ -155,6 +156,14 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "gpt-5.4-mini")) return .gpt54_mini;
         if (asciiContainsIgnoreCase(name, "gpt-5.5")) return .gpt55;
         if (asciiContainsIgnoreCase(name, "gpt-5.4")) return .gpt54;
+        // Kimi Code reports ids like "kimi-code/k3"; Claude Code on a Kimi
+        // backend reports bare version names like "k3[1m]" with no "kimi"
+        // substring. kN tokens are short, but display names are producer-
+        // controlled and no Claude/GPT name contains one. Must precede the
+        // Codex/GPT fallbacks below.
+        if (asciiContainsIgnoreCase(name, "kimi")) return .kimi;
+        if (asciiContainsIgnoreCase(name, "k3")) return .kimi;
+        if (asciiContainsIgnoreCase(name, "k2")) return .kimi;
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
@@ -177,6 +186,9 @@ const ModelType = enum {
             .gpt54_mini => "⚡",
             .gpt53_codex_spark => "✨",
             .codex => "⌘",
+            // New moon: Moonshot AI (月之暗面, "dark side of the moon");
+            // distinct from luna's full 🌙.
+            .kimi => "🌑",
             .unknown => "?",
         };
     }
@@ -2004,6 +2016,10 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.gpt54_mini, ModelType.fromName("gpt-5.4-mini"));
     try std.testing.expectEqual(ModelType.gpt53_codex_spark, ModelType.fromName("gpt-5.3-codex-spark"));
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("gpt-5.3-codex"));
+    try std.testing.expectEqual(ModelType.kimi, ModelType.fromName("kimi-code/k3"));
+    try std.testing.expectEqual(ModelType.kimi, ModelType.fromName("kimi-code/kimi-for-coding"));
+    try std.testing.expectEqual(ModelType.kimi, ModelType.fromName("Kimi K2"));
+    try std.testing.expectEqual(ModelType.kimi, ModelType.fromName("k3[1m]"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -2020,6 +2036,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("⚡", ModelType.gpt54_mini.emoji());
     try std.testing.expectEqualStrings("✨", ModelType.gpt53_codex_spark.emoji());
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
+    try std.testing.expectEqualStrings("🌑", ModelType.kimi.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 
