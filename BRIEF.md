@@ -37,6 +37,8 @@ Unit tests are the objective oracle for parser and formatter behavior. A local s
 - Working state does not time out in render mode; long autonomous turns remain working until `Stop`, and `updated_at` is kept for debugging.
 - The plugin locates the renderer through `AGENT_STATUSLINE_BIN`, `PATH`, or the repo-local build path.
 - Permission badges prefer explicit Codex nested `permissions.mode` when present; legacy top-level approval/sandbox and nested approval/profile derivation remain fallbacks. Top-level `permission_mode` is only a best-effort fallback for Claude-like payloads and is not treated as a documented Claude statusline contract.
+- The context gauge's ceiling is a configured auto-compact window when one is set, resolved with the client's own precedence — `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then `autoCompactWindow` in the generated settings file — and clamped to the model's window as the client clamps it. The arm fraction still applies on top, so a 300k window fills the gauge at ~232.5k tokens. The fraction itself stays a 0.775 estimate: the client resolves its own from a gated per-window table, so this is a close approximation, not a contract.
+- *Provisional (2026-07-29, awaiting ratification):* resolving that window costs one small settings-file read per render when the env var is unset, which the Latency dimension's "no scans beyond existing segments" wording did not anticipate. Kept because the read is bounded, read-only, skipped entirely when the env var is set, and far cheaper than the transcript scan already on the same path. Ratify or overturn.
 
 ## Boundary
 

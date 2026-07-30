@@ -526,12 +526,67 @@ fn execCommand(allocator: Allocator, io: std.Io, command: [:0]const u8, cwd: ?[]
     return allocator.dupe(u8, trimmed);
 }
 
+/// Fraction of the resolved context window that fills before auto-compact fires;
+/// the remainder is the compact buffer. This approximates the client's arm
+/// fraction — the client resolves its own from a gated per-window table — so it
+/// is a close estimate, not a contract.
+const auto_compact_arm_fraction: f64 = 0.775;
+
+/// Smallest auto-compact window the client accepts. Values below this are
+/// rejected rather than clamped, matching the client's own settings validation.
+const auto_compact_window_min: i64 = 100_000;
+
+/// Parse a configured auto-compact window, rejecting what the client rejects.
+fn parseAutoCompactWindow(raw: []const u8) ?i64 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    const value = std.fmt.parseInt(i64, trimmed, 10) catch return null;
+    if (value < auto_compact_window_min) return null;
+    return value;
+}
+
+/// Read `autoCompactWindow` from a Claude Code settings file. The live settings
+/// file is generated from every configuration layer, so whatever it holds is the
+/// effective value; no layer merging is repeated here.
+fn readAutoCompactWindowFromSettings(allocator: Allocator, io: std.Io, path: []const u8) ?i64 {
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer file.close(io);
+
+    var file_buffer: [4096]u8 = undefined;
+    var file_reader = file.readerStreaming(io, &file_buffer);
+    const content = readAllAlloc(allocator, &file_reader.interface) catch return null;
+    defer allocator.free(content);
+
+    const parsed = std.json.parseFromSlice(
+        struct { autoCompactWindow: ?i64 = null },
+        allocator,
+        content,
+        .{ .ignore_unknown_fields = true },
+    ) catch return null;
+    defer parsed.deinit();
+
+    const value = parsed.value.autoCompactWindow orelse return null;
+    if (value < auto_compact_window_min) return null;
+    return value;
+}
+
+/// Effective context size in tokens. A configured auto-compact window replaces
+/// the model's window but is clamped to it — the client never lets a configured
+/// window exceed what the model can actually hold — and the arm fraction applies
+/// on top either way. `null` leaves the model's own window in force.
+fn effectiveContextSize(window_size: f64, auto_compact_window: ?i64) f64 {
+    const resolved = if (auto_compact_window) |configured|
+        @min(window_size, @as(f64, @floatFromInt(configured)))
+    else
+        window_size;
+    return resolved * auto_compact_arm_fraction;
+}
+
 /// Calculate context usage percentage from API-provided values
 /// NOTE: This function is inaccurate - API values are cumulative session totals that
 /// don't reflect current context window position. Use calculateContextUsage() instead,
 /// which reads actual per-message token counts from the transcript file.
 /// Kept for reference/testing only.
-fn calculateContextUsageFromApi(input: StatuslineInput) ContextUsage {
+fn calculateContextUsageFromApi(input: StatuslineInput, auto_compact_window: ?i64) ContextUsage {
     const ctx = input.context_window orelse return ContextUsage{ .percentage = 0.0 };
     const window_size = ctx.context_window_size orelse return ContextUsage{ .percentage = 0.0 };
     if (window_size == 0) return ContextUsage{ .percentage = 0.0 };
@@ -540,8 +595,7 @@ fn calculateContextUsageFromApi(input: StatuslineInput) ContextUsage {
     const output_tokens = ctx.total_output_tokens orelse 0;
     const total_tokens = input_tokens + output_tokens;
 
-    // Effective context is 77.5% of window (22.5% reserved for autocompact buffer)
-    const effective_size: i64 = @intFromFloat(@as(f64, @floatFromInt(window_size)) * 0.775);
+    const effective_size: i64 = @intFromFloat(effectiveContextSize(@floatFromInt(window_size), auto_compact_window));
     if (effective_size == 0) return ContextUsage{ .percentage = 0.0 };
 
     // Use modulus to get current position within context window (tokens are cumulative)
@@ -555,7 +609,7 @@ fn calculateContextUsageFromApi(input: StatuslineInput) ContextUsage {
 /// Calculate context usage percentage from transcript file
 /// Parses the last assistant message to get current token counts
 /// Accounts for 22.5% autocompact buffer in effective context size
-fn calculateContextUsage(allocator: Allocator, io: std.Io, transcript_path: ?[]const u8, context_window_size: ?i64) !ContextUsage {
+fn calculateContextUsage(allocator: Allocator, io: std.Io, transcript_path: ?[]const u8, context_window_size: ?i64, auto_compact_window: ?i64) !ContextUsage {
     if (transcript_path == null) return ContextUsage{ .percentage = 0.0 };
 
     var file = if (std.Io.Dir.path.isAbsolute(transcript_path.?))
@@ -623,8 +677,7 @@ fn calculateContextUsage(allocator: Allocator, io: std.Io, transcript_path: ?[]c
         const total = tokens.input + tokens.output + tokens.cache_read + tokens.cache_creation;
         // Use API-provided context window size if available, otherwise default to 200k
         const window_size: f64 = if (context_window_size) |size| @floatFromInt(size) else 200000.0;
-        // Effective context is 77.5% of window (22.5% reserved for autocompact buffer)
-        const effective_size = window_size * 0.775;
+        const effective_size = effectiveContextSize(window_size, auto_compact_window);
         const pct = @min(100.0, (total * 100.0) / effective_size);
         return ContextUsage{ .percentage = pct, .total_tokens = @intFromFloat(total) };
     }
@@ -1915,6 +1968,24 @@ pub fn main(init: std.process.Init) !void {
         if (model.display_name) |name| {
             const model_type = ModelType.fromName(name);
 
+            // A configured auto-compact window moves the gauge's ceiling, so resolve
+            // it the way the client does: env var first, then the generated settings
+            // file. The env branch costs no I/O; the settings read only happens when
+            // it is unset, and is far cheaper than the transcript scan below.
+            const auto_compact_window: ?i64 = acw: {
+                if (init.environ_map.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")) |raw| {
+                    if (parseAutoCompactWindow(raw)) |configured| break :acw configured;
+                }
+                const settings_path = if (init.environ_map.get("CLAUDE_CONFIG_DIR")) |dir|
+                    std.fmt.allocPrint(allocator, "{s}/settings.json", .{dir}) catch break :acw null
+                else if (home.len > 0)
+                    std.fmt.allocPrint(allocator, "{s}/.claude/settings.json", .{home}) catch break :acw null
+                else
+                    break :acw null;
+                defer allocator.free(settings_path);
+                break :acw readAutoCompactWindowFromSettings(allocator, io, settings_path);
+            };
+
             // Calculate context usage from producer-provided fields or fall back to transcript parsing.
             const usage: ContextUsage = blk: {
                 if (input.context_window) |ctx| {
@@ -1925,8 +1996,7 @@ pub fn main(init: std.process.Init) !void {
                         // Use current_usage token counts directly.
                         const total_tokens = cur.totalTokens();
                         const window_size: f64 = @floatFromInt(ctx.context_window_size orelse 200000);
-                        // Effective context is 77.5% of window (22.5% reserved for autocompact buffer)
-                        const effective_size = window_size * 0.775;
+                        const effective_size = effectiveContextSize(window_size, auto_compact_window);
                         const pct = @min(100.0, (@as(f64, @floatFromInt(total_tokens)) * 100.0) / effective_size);
                         break :blk ContextUsage{ .percentage = pct, .total_tokens = @intCast(total_tokens) };
                     }
@@ -1934,7 +2004,7 @@ pub fn main(init: std.process.Init) !void {
                 // Fall back to transcript parsing for producers that do not send
                 // an authoritative percentage or current token usage.
                 const context_size = if (input.context_window) |ctx| ctx.context_window_size else null;
-                break :blk try calculateContextUsage(allocator, io, input.transcript_path, context_size);
+                break :blk try calculateContextUsage(allocator, io, input.transcript_path, context_size, auto_compact_window);
             };
 
             // Gauge + model emoji (e.g., "██░ 🎭")
@@ -2619,7 +2689,7 @@ test "calculateContextUsageFromApi with API values" {
             .context_window_size = 200000,
         },
     };
-    const usage_50 = calculateContextUsageFromApi(input_50);
+    const usage_50 = calculateContextUsageFromApi(input_50, null);
     try std.testing.expectEqual(@as(f64, 50.0), usage_50.percentage);
 
     // Test modulus wrap: 232500 tokens (1.5x effective) should also be 50%
@@ -2631,12 +2701,12 @@ test "calculateContextUsageFromApi with API values" {
             .context_window_size = 200000,
         },
     };
-    const usage_wrap = calculateContextUsageFromApi(input_wrap);
+    const usage_wrap = calculateContextUsageFromApi(input_wrap, null);
     try std.testing.expectEqual(@as(f64, 50.0), usage_wrap.percentage);
 
     // Test with missing context_window
     const input_empty = StatuslineInput{};
-    const usage_empty = calculateContextUsageFromApi(input_empty);
+    const usage_empty = calculateContextUsageFromApi(input_empty, null);
     try std.testing.expectEqual(@as(f64, 0.0), usage_empty.percentage);
 
     // Test with zero context window size
@@ -2647,13 +2717,13 @@ test "calculateContextUsageFromApi with API values" {
             .context_window_size = 0,
         },
     };
-    const usage_zero = calculateContextUsageFromApi(input_zero);
+    const usage_zero = calculateContextUsageFromApi(input_zero, null);
     try std.testing.expectEqual(@as(f64, 0.0), usage_zero.percentage);
 }
 
 test "calculateContextUsage returns zero with no transcript" {
     const allocator = std.testing.allocator;
-    const usage = try calculateContextUsage(allocator, std.testing.io, null, 200000);
+    const usage = try calculateContextUsage(allocator, std.testing.io, null, 200000, null);
     try std.testing.expectEqual(@as(f64, 0.0), usage.percentage);
 }
 
@@ -3336,4 +3406,46 @@ test "formatActivityTime renders idle timestamp" {
     var expected_writer = std.Io.Writer.fixed(&expected_buf);
     try expected_writer.print(" 💤{s}{s}{s}", .{ colors.light_gray, label, colors.reset });
     try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+}
+
+test "effectiveContextSize applies the arm fraction to the model window when unconfigured" {
+    // Unset auto-compact window leaves prior behavior untouched.
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 155_000.0),
+        effectiveContextSize(200_000.0, null),
+        0.001,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 775_000.0),
+        effectiveContextSize(1_000_000.0, null),
+        0.001,
+    );
+}
+
+test "effectiveContextSize honors a configured auto-compact window" {
+    // A 300k window on a 1M model: the ceiling follows the configured window,
+    // not the model's, so the gauge fills ~4.3x sooner than it otherwise would.
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 232_500.0),
+        effectiveContextSize(1_000_000.0, 300_000),
+        0.001,
+    );
+}
+
+test "effectiveContextSize clamps a configured window to the model window" {
+    // The client never lets a configured window exceed what the model can hold.
+    try std.testing.expectApproxEqAbs(
+        effectiveContextSize(200_000.0, null),
+        effectiveContextSize(200_000.0, 900_000),
+        0.001,
+    );
+}
+
+test "parseAutoCompactWindow accepts valid values and rejects the rest" {
+    try std.testing.expectEqual(@as(?i64, 300_000), parseAutoCompactWindow("300000"));
+    try std.testing.expectEqual(@as(?i64, 100_000), parseAutoCompactWindow(" 100000\n"));
+    // Below the client's floor, so the client would ignore it too.
+    try std.testing.expectEqual(@as(?i64, null), parseAutoCompactWindow("99999"));
+    try std.testing.expectEqual(@as(?i64, null), parseAutoCompactWindow("auto"));
+    try std.testing.expectEqual(@as(?i64, null), parseAutoCompactWindow(""));
 }
