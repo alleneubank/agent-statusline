@@ -1,5 +1,11 @@
 const std = @import("std");
 
+// The package manifest is the single source of truth for the version. Importing
+// it here means `--version` cannot drift from the tag the release workflow cuts;
+// a hand-maintained constant in main.zig would be free to disagree, and a
+// version string you cannot trust is worse than none for triage.
+const build_zon = @import("build.zig.zon");
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -26,6 +32,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+
+    // Attached to the module rather than the executable so the unit tests,
+    // which build the same module, can assert on the version too.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", build_zon.version);
+    exe_mod.addOptions("build_options", build_options);
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.

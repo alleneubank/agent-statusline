@@ -450,6 +450,62 @@ fn readAllAlloc(allocator: Allocator, reader: *std.Io.Reader) ![]u8 {
 
 const default_debug_log_path: []const u8 = "/tmp/statusline-debug.log";
 
+const version_string: []const u8 = @import("build_options").version;
+
+/// How one invocation behaves. `render` and `activity_hook` consume stdin;
+/// `version` and `help` must not, because they are typed at a terminal where
+/// nothing will ever arrive on fd 0 and the read would hang forever.
+const RunMode = enum { render, activity_hook, version, help };
+
+/// Claim an argument as a mode-selecting flag, or return null to leave it for
+/// the render-mode parser. Kept separate from the argument loop so the claimed
+/// set is directly testable — silently swallowing an unknown flag is what made
+/// `statusline --version` print a status line instead of a version.
+fn cliFlagMode(arg: []const u8) ?RunMode {
+    if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) return .version;
+    if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return .help;
+    return null;
+}
+
+const help_text: []const u8 =
+    \\statusline — single-line status renderer for agent statusline payloads.
+    \\
+    \\Usage:
+    \\  statusline [--debug]              Render a status line from JSON on stdin.
+    \\  statusline activity-hook <event>  Record a prompt/idle activity event.
+    \\  statusline --version, -V          Print the version and exit.
+    \\  statusline --help, -h             Print this help and exit.
+    \\
+    \\Render mode reads one JSON payload on stdin and writes one line to stdout.
+    \\It never fails the line: missing data hides a segment rather than erroring.
+    \\
+    \\Context gauge:
+    \\  The bar fills against the auto-compact ceiling, not the model's full
+    \\  context window, because auto-compact is what actually ends the session.
+    \\  The ceiling is (resolved window x 0.775), resolved in this order:
+    \\
+    \\    1. CLAUDE_CODE_AUTO_COMPACT_WINDOW   env var, wins outright
+    \\    2. autoCompactWindow                 from the settings file below
+    \\    3. context_window.context_window_size from the stdin payload
+    \\
+    \\  A configured window is clamped to the model's window and values under
+    \\  100000 are ignored, matching what the client itself honors. If the gauge
+    \\  reads lower than expected, the configured window is probably not being
+    \\  found: check steps 1 and 2 before suspecting the token count.
+    \\
+    \\Environment:
+    \\  CLAUDE_CODE_AUTO_COMPACT_WINDOW  Auto-compact window in tokens.
+    \\  CLAUDE_CONFIG_DIR                Settings dir; defaults to $HOME/.claude.
+    \\  STATUSLINE_DEBUG                 Truthy enables debug logging.
+    \\  STATUSLINE_DEBUG_LOG             Debug log path; defaults to
+    \\                                   /tmp/statusline-debug.log.
+    \\  STATUSLINE_CAPTURE_DIR           Directory to dump the raw stdin payload
+    \\                                   to, as input.json. The fastest way to
+    \\                                   see exactly what a producer sent.
+    \\  STATUSLINE_STATE_DIR             Activity state dir.
+    \\
+;
+
 fn envFlag(value: ?[]const u8) bool {
     const v = value orelse return false;
     return v.len > 0 and
@@ -567,6 +623,25 @@ fn readAutoCompactWindowFromSettings(allocator: Allocator, io: std.Io, path: []c
     const value = parsed.value.autoCompactWindow orelse return null;
     if (value < auto_compact_window_min) return null;
     return value;
+}
+
+/// Re-base a producer-reported usage percentage onto the gauge's ceiling.
+///
+/// A producer computes `used_percentage` against its own full context window.
+/// With no configured auto-compact window that denominator is ours too, so the
+/// figure is authoritative and passes through untouched (REQ-SL-052). Once a
+/// window is configured the producer is dividing by the wrong number — Claude
+/// Code reports 23% of a 1M window while auto-compact actually fires at 232.5k —
+/// so the implied token count is recovered and re-divided by our ceiling.
+fn rebaseProducerPercentage(pct: f64, window_size: f64, auto_compact_window: ?i64) f64 {
+    const clamped = @min(100.0, @max(0.0, pct));
+    if (auto_compact_window == null) return clamped;
+
+    const effective = effectiveContextSize(window_size, auto_compact_window);
+    if (!(effective > 0.0)) return clamped;
+
+    const implied_tokens = (clamped / 100.0) * window_size;
+    return @min(100.0, implied_tokens * 100.0 / effective);
 }
 
 /// Effective context size in tokens. A configured auto-compact window replaces
@@ -1821,18 +1896,38 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
 
-    const RunMode = enum { render, activity_hook };
     var run_mode: RunMode = .render;
     var hook_event_arg: ?[]const u8 = null;
     var debug_mode = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--debug")) {
+        if (cliFlagMode(arg)) |mode| {
+            run_mode = mode;
+            break;
+        } else if (std.mem.eql(u8, arg, "--debug")) {
             debug_mode = true;
         } else if (std.mem.eql(u8, arg, "activity-hook")) {
             run_mode = .activity_hook;
         } else if (run_mode == .activity_hook and hook_event_arg == null) {
             hook_event_arg = arg;
         }
+    }
+
+    // Answered before stdin is touched. Both are typed at a terminal, where
+    // fd 0 stays open with nothing coming, so reading first would hang.
+    switch (run_mode) {
+        .version, .help => {
+            var out_buffer: [4096]u8 = undefined;
+            var out_wrapper = std.Io.File.stdout().writer(io, &out_buffer);
+            const out = &out_wrapper.interface;
+            if (run_mode == .version) {
+                out.print("statusline {s}\n", .{version_string}) catch {};
+            } else {
+                out.print("{s}", .{help_text}) catch {};
+            }
+            out.flush() catch {};
+            return;
+        },
+        .render, .activity_hook => {},
     }
     debug_mode = debug_mode or envFlag(init.environ_map.get("STATUSLINE_DEBUG"));
     const env_debug_log_path = debugLogPath(init);
@@ -1989,16 +2084,33 @@ pub fn main(init: std.process.Init) !void {
             // Calculate context usage from producer-provided fields or fall back to transcript parsing.
             const usage: ContextUsage = blk: {
                 if (input.context_window) |ctx| {
-                    if (ctx.used_percentage) |pct| {
-                        break :blk ContextUsage{ .percentage = @min(100.0, @max(0.0, pct)) };
+                    const window_size: f64 = @floatFromInt(ctx.context_window_size orelse 200000);
+
+                    // With no configured window the producer's percentage is
+                    // measured against the same ceiling this gauge uses, so it
+                    // stays authoritative and cheapest (REQ-SL-052).
+                    if (auto_compact_window == null) {
+                        if (ctx.used_percentage) |pct| {
+                            break :blk ContextUsage{ .percentage = @min(100.0, @max(0.0, pct)) };
+                        }
                     }
+
+                    // Otherwise exact token counts win: the producer's figure is
+                    // both against the wrong denominator and rounded to whole
+                    // percent, which is +/-5000 tokens on a 1M window.
                     if (ctx.current_usage) |cur| {
-                        // Use current_usage token counts directly.
                         const total_tokens = cur.totalTokens();
-                        const window_size: f64 = @floatFromInt(ctx.context_window_size orelse 200000);
                         const effective_size = effectiveContextSize(window_size, auto_compact_window);
                         const pct = @min(100.0, (@as(f64, @floatFromInt(total_tokens)) * 100.0) / effective_size);
                         break :blk ContextUsage{ .percentage = pct, .total_tokens = @intCast(total_tokens) };
+                    }
+
+                    // No token counts: re-base the percentage rather than drop
+                    // to the transcript scan, which costs far more.
+                    if (ctx.used_percentage) |pct| {
+                        break :blk ContextUsage{
+                            .percentage = rebaseProducerPercentage(pct, window_size, auto_compact_window),
+                        };
                     }
                 }
                 // Fall back to transcript parsing for producers that do not send
@@ -2911,6 +3023,81 @@ test "JSON parsing with current_usage field" {
     const effective_size = window_size * 0.775;
     const pct = (@as(f64, @floatFromInt(cur.totalTokens())) * 100.0) / effective_size;
     try std.testing.expectApproxEqAbs(@as(f64, 43.6), pct, 0.1);
+}
+
+test "producer percentage is passed through when no window is configured" {
+    // REQ-SL-052: with no configured window the producer's ceiling is ours, so
+    // its figure stays authoritative. Codex relies on this.
+    try std.testing.expectApproxEqAbs(@as(f64, 52.0), rebaseProducerPercentage(52.0, 200000.0, null), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 100.0), rebaseProducerPercentage(140.0, 200000.0, null), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), rebaseProducerPercentage(-5.0, 200000.0, null), 0.001);
+}
+
+test "producer percentage is re-based onto a configured auto-compact window" {
+    // Real Claude Code payload, captured 2026-07-30: it reports 23% against the
+    // model's full 1M window while auto-compact is configured at 300k, so the
+    // true position is 23% * 1e6 / (300k * 0.775) = 98.9%, not 23%.
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 98.92),
+        rebaseProducerPercentage(23.0, 1_000_000.0, 300_000),
+        0.01,
+    );
+    // Clamped, never past full.
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 100.0),
+        rebaseProducerPercentage(40.0, 1_000_000.0, 300_000),
+        0.001,
+    );
+}
+
+test "configured window prefers exact token counts over a rounded percentage" {
+    // used_percentage arrives rounded to whole percent — +/-5000 tokens on a 1M
+    // window. current_usage from the same captured payload totals 231835, which
+    // against the 232500 ceiling is 99.71%, not the 98.92% the rounded figure
+    // implies. The gap is why token counts win when both are present.
+    const cur = CurrentUsage{
+        .input_tokens = 2,
+        .output_tokens = 246,
+        .cache_creation_input_tokens = 863,
+        .cache_read_input_tokens = 230724,
+    };
+    try std.testing.expectEqual(@as(i64, 231835), @as(i64, @intCast(cur.totalTokens())));
+
+    const effective = effectiveContextSize(1_000_000.0, 300_000);
+    try std.testing.expectApproxEqAbs(@as(f64, 232500.0), effective, 0.001);
+
+    const pct = @min(100.0, @as(f64, @floatFromInt(cur.totalTokens())) * 100.0 / effective);
+    try std.testing.expectApproxEqAbs(@as(f64, 99.71), pct, 0.01);
+}
+
+test "CLI flags resolve to their run modes" {
+    try std.testing.expectEqual(RunMode.version, cliFlagMode("--version").?);
+    try std.testing.expectEqual(RunMode.version, cliFlagMode("-V").?);
+    try std.testing.expectEqual(RunMode.help, cliFlagMode("--help").?);
+    try std.testing.expectEqual(RunMode.help, cliFlagMode("-h").?);
+}
+
+test "CLI flag parsing ignores render-mode arguments" {
+    // These must stay unclaimed or they would short-circuit a real render.
+    try std.testing.expect(cliFlagMode("--debug") == null);
+    try std.testing.expect(cliFlagMode("activity-hook") == null);
+    try std.testing.expect(cliFlagMode("Stop") == null);
+    try std.testing.expect(cliFlagMode("") == null);
+}
+
+test "version string is populated from the package manifest" {
+    // Guards against the binary reporting an empty or placeholder version,
+    // which would make `--version` useless for the triage it exists to serve.
+    try std.testing.expect(version_string.len > 0);
+    try std.testing.expect(std.mem.indexOfScalar(u8, version_string, '.') != null);
+}
+
+test "help text names the triage-relevant environment variables" {
+    // --help exists to answer "why is the gauge reading what it reads", so the
+    // two variables that move the context ceiling must be discoverable there.
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "CLAUDE_CODE_AUTO_COMPACT_WINDOW") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "CLAUDE_CONFIG_DIR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "--debug") != null);
 }
 
 test "JSON parsing with Codex used_percentage field" {
