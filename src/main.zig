@@ -84,6 +84,19 @@ const PermissionsInput = struct {
     yolo: ?bool = null,
 };
 
+/// Context accounting as a producer reports it. `context_window_size` is the
+/// model's own window with no auto-compact reserve removed, so it is a raw
+/// capacity, never the gauge's ceiling. Claude Code sends `used_percentage` and
+/// `current_usage` together; Codex sends the percentage alone.
+const ContextWindow = struct {
+    total_input_tokens: ?i64 = null,
+    total_output_tokens: ?i64 = null,
+    context_window_size: ?i64 = null,
+    used_percentage: ?f64 = null,
+    /// Nested inside context_window, provides per-message token counts.
+    current_usage: ?CurrentUsage = null,
+};
+
 /// Input structure from supported agent statusline producers.
 const StatuslineInput = struct {
     workspace: ?struct {
@@ -102,14 +115,7 @@ const StatuslineInput = struct {
     session_id: ?[]const u8 = null,
     transcript_path: ?[]const u8 = null,
     version: ?[]const u8 = null,
-    context_window: ?struct {
-        total_input_tokens: ?i64 = null,
-        total_output_tokens: ?i64 = null,
-        context_window_size: ?i64 = null,
-        used_percentage: ?f64 = null,
-        /// Nested inside context_window, provides per-message token counts.
-        current_usage: ?CurrentUsage = null,
-    } = null,
+    context_window: ?ContextWindow = null,
     cost: ?struct {
         total_cost_usd: ?f64 = null,
         total_duration_ms: ?i64 = null,
@@ -481,8 +487,12 @@ const help_text: []const u8 =
     \\
     \\Context gauge:
     \\  The bar fills against the auto-compact ceiling, not the model's full
-    \\  context window, because auto-compact is what actually ends the session.
-    \\  The ceiling is (resolved window x 0.775), resolved in this order:
+    \\  context window, because auto-compact is what actually ends the session:
+    \\
+    \\    ceiling = resolved window - min(max output tokens, 20000) - 13000
+    \\
+    \\  Those two reserves are flat token counts, not a share of the window, so
+    \\  a bigger window does not buy a bigger buffer. The resolved window is:
     \\
     \\    1. CLAUDE_CODE_AUTO_COMPACT_WINDOW   env var, wins outright
     \\    2. autoCompactWindow                 from the settings file below
@@ -491,10 +501,14 @@ const help_text: []const u8 =
     \\  A configured window is clamped to the model's window and values under
     \\  100000 are ignored, matching what the client itself honors. If the gauge
     \\  reads lower than expected, the configured window is probably not being
-    \\  found: check steps 1 and 2 before suspecting the token count.
+    \\  found: check steps 1 and 2 before suspecting the token count. Compare
+    \\  against the client's own /context, whose "Autocompact buffer" line is
+    \\  the same two reserves added together.
     \\
     \\Environment:
     \\  CLAUDE_CODE_AUTO_COMPACT_WINDOW  Auto-compact window in tokens.
+    \\  CLAUDE_CODE_MAX_OUTPUT_TOKENS    Output allowance withheld from the
+    \\                                   ceiling; only lowers it below 20000.
     \\  CLAUDE_CONFIG_DIR                Settings dir; defaults to $HOME/.claude.
     \\  STATUSLINE_DEBUG                 Truthy enables debug logging.
     \\  STATUSLINE_DEBUG_LOG             Debug log path; defaults to
@@ -582,15 +596,71 @@ fn execCommand(allocator: Allocator, io: std.Io, command: [:0]const u8, cwd: ?[]
     return allocator.dupe(u8, trimmed);
 }
 
-/// Fraction of the resolved context window that fills before auto-compact fires;
-/// the remainder is the compact buffer. This approximates the client's arm
-/// fraction — the client resolves its own from a gated per-window table — so it
-/// is a close estimate, not a contract.
-const auto_compact_arm_fraction: f64 = 0.775;
+/// Ceiling on the max-output allowance the client withholds from the context
+/// window. The allowance is the model's own output limit, but never more than
+/// this, so for every current model this constant is what actually binds.
+const auto_compact_output_reserve_max: i64 = 20_000;
+
+/// Flat headroom the client subtracts below the output allowance before arming
+/// auto-compact. Together the two reserves are the entire compact buffer — it is
+/// not a fraction of the window, which is why a bigger window does not buy a
+/// bigger buffer.
+const auto_compact_headroom_tokens: i64 = 13_000;
+
+/// Model window assumed when a producer sends no `context_window_size`.
+const default_context_window_size: i64 = 200_000;
 
 /// Smallest auto-compact window the client accepts. Values below this are
 /// rejected rather than clamped, matching the client's own settings validation.
 const auto_compact_window_min: i64 = 100_000;
+
+/// The token count at which the client auto-compacts, and the two inputs that
+/// move it. Resolved once per render so every usage path divides by the same
+/// number.
+///
+/// Claude Code 2.1.220 arms auto-compact at
+/// `min(model_window, configured_window) - min(max_output_tokens, 20_000) - 13_000`
+/// (`toy` -> `uFe` -> `uMu`, and the reactive/in-process paths via `gJr`). The
+/// reserve is those two flat constants, not a percentage of the window: on a 1M
+/// model with `autoCompactWindow` 400_000 the ceiling is 367_000, which the
+/// client corroborates by reporting a 33k "Autocompact buffer" in `/context`.
+const ContextCeiling = struct {
+    /// Configured auto-compact window; `null` leaves the model's own window in force.
+    auto_compact_window: ?i64 = null,
+    /// The client's max-output allowance, already capped at its own ceiling.
+    output_reserve: i64 = auto_compact_output_reserve_max,
+
+    fn tokens(self: ContextCeiling, window_size: f64) f64 {
+        const resolved = if (self.auto_compact_window) |configured|
+            // The client never lets a configured window exceed what the model holds.
+            @min(window_size, @as(f64, @floatFromInt(configured)))
+        else
+            window_size;
+        const reserve: f64 = @floatFromInt(self.output_reserve + auto_compact_headroom_tokens);
+        return resolved - reserve;
+    }
+};
+
+/// Resolve the client's max-output allowance from the environment. The client
+/// clamps `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to the model's own limit before
+/// capping the reserve; every current model's limit sits far above the cap, so
+/// clamping only matters when the operator lowered the variable below it.
+fn resolveOutputReserve(raw: ?[]const u8) i64 {
+    const value = raw orelse return auto_compact_output_reserve_max;
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    const parsed = std.fmt.parseInt(i64, trimmed, 10) catch return auto_compact_output_reserve_max;
+    if (parsed <= 0) return auto_compact_output_reserve_max;
+    return @min(parsed, auto_compact_output_reserve_max);
+}
+
+/// Usage as a percentage of the auto-compact ceiling, clamped to [0, 100].
+/// A non-positive ceiling means the payload described a window smaller than the
+/// client's own reserve; report 0 rather than dividing, so a malformed payload
+/// hides the gauge instead of pinning it full.
+fn percentageOfCeiling(total_tokens: f64, ceiling: f64) f64 {
+    if (!(ceiling > 0.0)) return 0.0;
+    return @min(100.0, @max(0.0, total_tokens * 100.0 / ceiling));
+}
 
 /// Parse a configured auto-compact window, rejecting what the client rejects.
 fn parseAutoCompactWindow(raw: []const u8) ?i64 {
@@ -625,35 +695,35 @@ fn readAutoCompactWindowFromSettings(allocator: Allocator, io: std.Io, path: []c
     return value;
 }
 
-/// Re-base a producer-reported usage percentage onto the gauge's ceiling.
+/// Pick the context usage a payload can support, given the resolved ceiling.
 ///
-/// A producer computes `used_percentage` against its own full context window.
-/// With no configured auto-compact window that denominator is ours too, so the
-/// figure is authoritative and passes through untouched (REQ-SL-052). Once a
-/// window is configured the producer is dividing by the wrong number — Claude
-/// Code reports 23% of a 1M window while auto-compact actually fires at 232.5k —
-/// so the implied token count is recovered and re-divided by our ceiling.
-fn rebaseProducerPercentage(pct: f64, window_size: f64, auto_compact_window: ?i64) f64 {
-    const clamped = @min(100.0, @max(0.0, pct));
-    if (auto_compact_window == null) return clamped;
+/// Exact token counts win wherever a producer sends them. Claude Code always
+/// does, and its `used_percentage` is measured against the raw model window with
+/// none of the auto-compact reserve removed, so that figure reads far lower than
+/// the session's true position (REQ-SL-052).
+///
+/// A percentage-only producer — Codex — is trusted verbatim instead. It has no
+/// auto-compact reserve to account for, so its figure already answers "how full
+/// am I", and re-basing it onto Claude's ceiling would only corrupt it.
+///
+/// Returns `null` when the payload carries neither, which is the caller's signal
+/// to fall back to the transcript scan.
+fn contextUsageFromPayload(ctx: ContextWindow, ceiling: ContextCeiling) ?ContextUsage {
+    const window_size: f64 = @floatFromInt(ctx.context_window_size orelse default_context_window_size);
 
-    const effective = effectiveContextSize(window_size, auto_compact_window);
-    if (!(effective > 0.0)) return clamped;
+    if (ctx.current_usage) |current| {
+        const total_tokens = current.totalTokens();
+        return ContextUsage{
+            .percentage = percentageOfCeiling(@floatFromInt(total_tokens), ceiling.tokens(window_size)),
+            .total_tokens = @intCast(total_tokens),
+        };
+    }
 
-    const implied_tokens = (clamped / 100.0) * window_size;
-    return @min(100.0, implied_tokens * 100.0 / effective);
-}
+    if (ctx.used_percentage) |pct| {
+        return ContextUsage{ .percentage = @min(100.0, @max(0.0, pct)) };
+    }
 
-/// Effective context size in tokens. A configured auto-compact window replaces
-/// the model's window but is clamped to it — the client never lets a configured
-/// window exceed what the model can actually hold — and the arm fraction applies
-/// on top either way. `null` leaves the model's own window in force.
-fn effectiveContextSize(window_size: f64, auto_compact_window: ?i64) f64 {
-    const resolved = if (auto_compact_window) |configured|
-        @min(window_size, @as(f64, @floatFromInt(configured)))
-    else
-        window_size;
-    return resolved * auto_compact_arm_fraction;
+    return null;
 }
 
 /// Calculate context usage percentage from API-provided values
@@ -661,7 +731,7 @@ fn effectiveContextSize(window_size: f64, auto_compact_window: ?i64) f64 {
 /// don't reflect current context window position. Use calculateContextUsage() instead,
 /// which reads actual per-message token counts from the transcript file.
 /// Kept for reference/testing only.
-fn calculateContextUsageFromApi(input: StatuslineInput, auto_compact_window: ?i64) ContextUsage {
+fn calculateContextUsageFromApi(input: StatuslineInput, ceiling: ContextCeiling) ContextUsage {
     const ctx = input.context_window orelse return ContextUsage{ .percentage = 0.0 };
     const window_size = ctx.context_window_size orelse return ContextUsage{ .percentage = 0.0 };
     if (window_size == 0) return ContextUsage{ .percentage = 0.0 };
@@ -670,8 +740,8 @@ fn calculateContextUsageFromApi(input: StatuslineInput, auto_compact_window: ?i6
     const output_tokens = ctx.total_output_tokens orelse 0;
     const total_tokens = input_tokens + output_tokens;
 
-    const effective_size: i64 = @intFromFloat(effectiveContextSize(@floatFromInt(window_size), auto_compact_window));
-    if (effective_size == 0) return ContextUsage{ .percentage = 0.0 };
+    const effective_size: i64 = @intFromFloat(ceiling.tokens(@floatFromInt(window_size)));
+    if (effective_size <= 0) return ContextUsage{ .percentage = 0.0 };
 
     // Use modulus to get current position within context window (tokens are cumulative)
     const current_tokens = @mod(total_tokens, effective_size);
@@ -683,8 +753,8 @@ fn calculateContextUsageFromApi(input: StatuslineInput, auto_compact_window: ?i6
 
 /// Calculate context usage percentage from transcript file
 /// Parses the last assistant message to get current token counts
-/// Accounts for 22.5% autocompact buffer in effective context size
-fn calculateContextUsage(allocator: Allocator, io: std.Io, transcript_path: ?[]const u8, context_window_size: ?i64, auto_compact_window: ?i64) !ContextUsage {
+/// Divides by the auto-compact ceiling, not the model's full window
+fn calculateContextUsage(allocator: Allocator, io: std.Io, transcript_path: ?[]const u8, context_window_size: ?i64, ceiling: ContextCeiling) !ContextUsage {
     if (transcript_path == null) return ContextUsage{ .percentage = 0.0 };
 
     var file = if (std.Io.Dir.path.isAbsolute(transcript_path.?))
@@ -750,10 +820,9 @@ fn calculateContextUsage(allocator: Allocator, io: std.Io, transcript_path: ?[]c
         };
 
         const total = tokens.input + tokens.output + tokens.cache_read + tokens.cache_creation;
-        // Use API-provided context window size if available, otherwise default to 200k
-        const window_size: f64 = if (context_window_size) |size| @floatFromInt(size) else 200000.0;
-        const effective_size = effectiveContextSize(window_size, auto_compact_window);
-        const pct = @min(100.0, (total * 100.0) / effective_size);
+        // Use API-provided context window size if available, otherwise the default.
+        const window_size: f64 = @floatFromInt(context_window_size orelse default_context_window_size);
+        const pct = percentageOfCeiling(total, ceiling.tokens(window_size));
         return ContextUsage{ .percentage = pct, .total_tokens = @intFromFloat(total) };
     }
 
@@ -2067,56 +2136,32 @@ pub fn main(init: std.process.Init) !void {
             // it the way the client does: env var first, then the generated settings
             // file. The env branch costs no I/O; the settings read only happens when
             // it is unset, and is far cheaper than the transcript scan below.
-            const auto_compact_window: ?i64 = acw: {
-                if (init.environ_map.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")) |raw| {
-                    if (parseAutoCompactWindow(raw)) |configured| break :acw configured;
-                }
-                const settings_path = if (init.environ_map.get("CLAUDE_CONFIG_DIR")) |dir|
-                    std.fmt.allocPrint(allocator, "{s}/settings.json", .{dir}) catch break :acw null
-                else if (home.len > 0)
-                    std.fmt.allocPrint(allocator, "{s}/.claude/settings.json", .{home}) catch break :acw null
-                else
-                    break :acw null;
-                defer allocator.free(settings_path);
-                break :acw readAutoCompactWindowFromSettings(allocator, io, settings_path);
+            const ceiling: ContextCeiling = .{
+                .auto_compact_window = acw: {
+                    if (init.environ_map.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")) |raw| {
+                        if (parseAutoCompactWindow(raw)) |configured| break :acw configured;
+                    }
+                    const settings_path = if (init.environ_map.get("CLAUDE_CONFIG_DIR")) |dir|
+                        std.fmt.allocPrint(allocator, "{s}/settings.json", .{dir}) catch break :acw null
+                    else if (home.len > 0)
+                        std.fmt.allocPrint(allocator, "{s}/.claude/settings.json", .{home}) catch break :acw null
+                    else
+                        break :acw null;
+                    defer allocator.free(settings_path);
+                    break :acw readAutoCompactWindowFromSettings(allocator, io, settings_path);
+                },
+                .output_reserve = resolveOutputReserve(init.environ_map.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")),
             };
 
             // Calculate context usage from producer-provided fields or fall back to transcript parsing.
             const usage: ContextUsage = blk: {
                 if (input.context_window) |ctx| {
-                    const window_size: f64 = @floatFromInt(ctx.context_window_size orelse 200000);
-
-                    // With no configured window the producer's percentage is
-                    // measured against the same ceiling this gauge uses, so it
-                    // stays authoritative and cheapest (REQ-SL-052).
-                    if (auto_compact_window == null) {
-                        if (ctx.used_percentage) |pct| {
-                            break :blk ContextUsage{ .percentage = @min(100.0, @max(0.0, pct)) };
-                        }
-                    }
-
-                    // Otherwise exact token counts win: the producer's figure is
-                    // both against the wrong denominator and rounded to whole
-                    // percent, which is +/-5000 tokens on a 1M window.
-                    if (ctx.current_usage) |cur| {
-                        const total_tokens = cur.totalTokens();
-                        const effective_size = effectiveContextSize(window_size, auto_compact_window);
-                        const pct = @min(100.0, (@as(f64, @floatFromInt(total_tokens)) * 100.0) / effective_size);
-                        break :blk ContextUsage{ .percentage = pct, .total_tokens = @intCast(total_tokens) };
-                    }
-
-                    // No token counts: re-base the percentage rather than drop
-                    // to the transcript scan, which costs far more.
-                    if (ctx.used_percentage) |pct| {
-                        break :blk ContextUsage{
-                            .percentage = rebaseProducerPercentage(pct, window_size, auto_compact_window),
-                        };
-                    }
+                    if (contextUsageFromPayload(ctx, ceiling)) |from_payload| break :blk from_payload;
                 }
-                // Fall back to transcript parsing for producers that do not send
-                // an authoritative percentage or current token usage.
+                // Fall back to transcript parsing for producers that send neither
+                // token counts nor a usage percentage.
                 const context_size = if (input.context_window) |ctx| ctx.context_window_size else null;
-                break :blk try calculateContextUsage(allocator, io, input.transcript_path, context_size, auto_compact_window);
+                break :blk try calculateContextUsage(allocator, io, input.transcript_path, context_size, ceiling);
             };
 
             // Gauge + model emoji (e.g., "██░ 🎭")
@@ -2792,33 +2837,33 @@ test "writeLocationPrefix" {
 test "calculateContextUsageFromApi with API values" {
     // Keep the token-derived fallback covered even when producers provide a direct percentage.
     // See: https://github.com/anthropics/claude-code/issues/13783
-    // Effective context = 200000 * 0.775 = 155000
-    // Test with 50% usage: 77500 % 155000 = 77500, 77500/155000 = 50%
+    // Ceiling = 200000 - 20000 - 13000 = 167000.
+    // Test with 50% usage: 83500 % 167000 = 83500, 83500/167000 = 50%
     const input_50 = StatuslineInput{
         .context_window = .{
-            .total_input_tokens = 40000,
-            .total_output_tokens = 37500,
+            .total_input_tokens = 43500,
+            .total_output_tokens = 40000,
             .context_window_size = 200000,
         },
     };
-    const usage_50 = calculateContextUsageFromApi(input_50, null);
+    const usage_50 = calculateContextUsageFromApi(input_50, .{});
     try std.testing.expectEqual(@as(f64, 50.0), usage_50.percentage);
 
-    // Test modulus wrap: 232500 tokens (1.5x effective) should also be 50%
-    // 232500 % 155000 = 77500, 77500/155000 = 50%
+    // Test modulus wrap: 250500 tokens (1.5x the ceiling) should also be 50%
+    // 250500 % 167000 = 83500, 83500/167000 = 50%
     const input_wrap = StatuslineInput{
         .context_window = .{
-            .total_input_tokens = 120000,
-            .total_output_tokens = 112500,
+            .total_input_tokens = 130500,
+            .total_output_tokens = 120000,
             .context_window_size = 200000,
         },
     };
-    const usage_wrap = calculateContextUsageFromApi(input_wrap, null);
+    const usage_wrap = calculateContextUsageFromApi(input_wrap, .{});
     try std.testing.expectEqual(@as(f64, 50.0), usage_wrap.percentage);
 
     // Test with missing context_window
     const input_empty = StatuslineInput{};
-    const usage_empty = calculateContextUsageFromApi(input_empty, null);
+    const usage_empty = calculateContextUsageFromApi(input_empty, .{});
     try std.testing.expectEqual(@as(f64, 0.0), usage_empty.percentage);
 
     // Test with zero context window size
@@ -2829,13 +2874,25 @@ test "calculateContextUsageFromApi with API values" {
             .context_window_size = 0,
         },
     };
-    const usage_zero = calculateContextUsageFromApi(input_zero, null);
+    const usage_zero = calculateContextUsageFromApi(input_zero, .{});
     try std.testing.expectEqual(@as(f64, 0.0), usage_zero.percentage);
+
+    // A window smaller than the client's own reserve leaves no ceiling to divide
+    // by. Report nothing rather than pinning the gauge full.
+    const input_under_reserve = StatuslineInput{
+        .context_window = .{
+            .total_input_tokens = 1000,
+            .total_output_tokens = 1000,
+            .context_window_size = 30000,
+        },
+    };
+    const usage_under_reserve = calculateContextUsageFromApi(input_under_reserve, .{});
+    try std.testing.expectEqual(@as(f64, 0.0), usage_under_reserve.percentage);
 }
 
 test "calculateContextUsage returns zero with no transcript" {
     const allocator = std.testing.allocator;
-    const usage = try calculateContextUsage(allocator, std.testing.io, null, 200000, null);
+    const usage = try calculateContextUsage(allocator, std.testing.io, null, 200000, .{});
     try std.testing.expectEqual(@as(f64, 0.0), usage.percentage);
 }
 
@@ -3018,43 +3075,77 @@ test "JSON parsing with current_usage field" {
     // Total should be 67650
     try std.testing.expectEqual(@as(i64, 67650), cur.totalTokens());
 
-    // Verify percentage calculation: 67650 / (200000 * 0.775) = 43.6%
-    const window_size: f64 = 200000.0;
-    const effective_size = window_size * 0.775;
-    const pct = (@as(f64, @floatFromInt(cur.totalTokens())) * 100.0) / effective_size;
-    try std.testing.expectApproxEqAbs(@as(f64, 43.6), pct, 0.1);
-}
-
-test "producer percentage is passed through when no window is configured" {
-    // REQ-SL-052: with no configured window the producer's ceiling is ours, so
-    // its figure stays authoritative. Codex relies on this.
-    try std.testing.expectApproxEqAbs(@as(f64, 52.0), rebaseProducerPercentage(52.0, 200000.0, null), 0.001);
-    try std.testing.expectApproxEqAbs(@as(f64, 100.0), rebaseProducerPercentage(140.0, 200000.0, null), 0.001);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.0), rebaseProducerPercentage(-5.0, 200000.0, null), 0.001);
-}
-
-test "producer percentage is re-based onto a configured auto-compact window" {
-    // Real Claude Code payload, captured 2026-07-30: it reports 23% against the
-    // model's full 1M window while auto-compact is configured at 300k, so the
-    // true position is 23% * 1e6 / (300k * 0.775) = 98.9%, not 23%.
-    try std.testing.expectApproxEqAbs(
-        @as(f64, 98.92),
-        rebaseProducerPercentage(23.0, 1_000_000.0, 300_000),
-        0.01,
+    // Verify percentage calculation: 67650 / (200000 - 33000) = 40.5%
+    const pct = percentageOfCeiling(
+        @floatFromInt(cur.totalTokens()),
+        (ContextCeiling{}).tokens(200_000.0),
     );
-    // Clamped, never past full.
+    try std.testing.expectApproxEqAbs(@as(f64, 40.5), pct, 0.1);
+}
+
+test "a percentage-only producer is trusted verbatim" {
+    // REQ-SL-052: Codex sends used_percentage with no current_usage. It has no
+    // auto-compact reserve to account for, so its figure already answers "how
+    // full am I" — including on a host where a Claude window happens to resolve.
+    const codex = ContextWindow{ .context_window_size = 272_000, .used_percentage = 52.0 };
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 52.0),
+        contextUsageFromPayload(codex, .{}).?.percentage,
+        0.001,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 52.0),
+        contextUsageFromPayload(codex, .{ .auto_compact_window = 400_000 }).?.percentage,
+        0.001,
+    );
+    // Out-of-range figures still clamp.
+    const over = ContextWindow{ .context_window_size = 272_000, .used_percentage = 140.0 };
+    try std.testing.expectApproxEqAbs(@as(f64, 100.0), contextUsageFromPayload(over, .{}).?.percentage, 0.001);
+    const under = ContextWindow{ .context_window_size = 272_000, .used_percentage = -5.0 };
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), contextUsageFromPayload(under, .{}).?.percentage, 0.001);
+}
+
+test "token counts beat a producer percentage measured against the raw window" {
+    // The live payload behind this fix: Claude Code reports 30% because it
+    // divides 303100 by the model's full 1M window, subtracting none of the
+    // auto-compact reserve. Auto-compact actually fires at 367000, so the true
+    // position is 82.6%. Trusting the producer would under-read by 52 points;
+    // the superseded 0.775 fraction over-read it to 97.8%.
+    const live = ContextWindow{
+        .context_window_size = 1_000_000,
+        .used_percentage = 30.0,
+        .current_usage = .{ .input_tokens = 3_100, .cache_read_input_tokens = 300_000 },
+    };
+    const usage = contextUsageFromPayload(live, .{ .auto_compact_window = 400_000 }).?;
+    try std.testing.expectEqual(@as(u64, 303_100), usage.total_tokens);
+    try std.testing.expectApproxEqAbs(@as(f64, 82.59), usage.percentage, 0.01);
+}
+
+test "token counts win with no configured window too" {
+    // Even unconfigured, the producer's percentage divides by the raw model
+    // window: 167000 of a 200k window is full, but it would report 84%.
+    const at_ceiling = ContextWindow{
+        .context_window_size = 200_000,
+        .used_percentage = 84.0,
+        .current_usage = .{ .input_tokens = 167_000 },
+    };
     try std.testing.expectApproxEqAbs(
         @as(f64, 100.0),
-        rebaseProducerPercentage(40.0, 1_000_000.0, 300_000),
+        contextUsageFromPayload(at_ceiling, .{}).?.percentage,
         0.001,
     );
 }
 
+test "a payload with neither source falls through to the transcript scan" {
+    const empty = ContextWindow{ .context_window_size = 200_000 };
+    try std.testing.expect(contextUsageFromPayload(empty, .{}) == null);
+}
+
 test "configured window prefers exact token counts over a rounded percentage" {
     // used_percentage arrives rounded to whole percent — +/-5000 tokens on a 1M
-    // window. current_usage from the same captured payload totals 231835, which
-    // against the 232500 ceiling is 99.71%, not the 98.92% the rounded figure
-    // implies. The gap is why token counts win when both are present.
+    // window. current_usage from the captured 2026-07-30 payload totals 231835,
+    // which against the 267000 ceiling is 86.83%. The rounded 23% figure implies
+    // 230000, a 1835-token gap; that is why token counts win when both exist.
     const cur = CurrentUsage{
         .input_tokens = 2,
         .output_tokens = 246,
@@ -3063,11 +3154,11 @@ test "configured window prefers exact token counts over a rounded percentage" {
     };
     try std.testing.expectEqual(@as(i64, 231835), @as(i64, @intCast(cur.totalTokens())));
 
-    const effective = effectiveContextSize(1_000_000.0, 300_000);
-    try std.testing.expectApproxEqAbs(@as(f64, 232500.0), effective, 0.001);
+    const effective = (ContextCeiling{ .auto_compact_window = 300_000 }).tokens(1_000_000.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 267000.0), effective, 0.001);
 
-    const pct = @min(100.0, @as(f64, @floatFromInt(cur.totalTokens())) * 100.0 / effective);
-    try std.testing.expectApproxEqAbs(@as(f64, 99.71), pct, 0.01);
+    const pct = percentageOfCeiling(@floatFromInt(cur.totalTokens()), effective);
+    try std.testing.expectApproxEqAbs(@as(f64, 86.83), pct, 0.01);
 }
 
 test "CLI flags resolve to their run modes" {
@@ -3595,37 +3686,84 @@ test "formatActivityTime renders idle timestamp" {
     try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
 }
 
-test "effectiveContextSize applies the arm fraction to the model window when unconfigured" {
-    // Unset auto-compact window leaves prior behavior untouched.
+test "the gauge ceiling matches the client's auto-compact threshold" {
+    // Claude Code 2.1.220 arms auto-compact at
+    //   min(model_window, configured) - min(max_output_tokens, 20_000) - 13_000
+    // (`toy` -> `uFe` -> `uMu`, and the reactive path via `gJr`). On a 1M model
+    // with autoCompactWindow 400_000 that is 367_000, which the client's own
+    // /context corroborates by reporting a 33k "Autocompact buffer".
     try std.testing.expectApproxEqAbs(
-        @as(f64, 155_000.0),
-        effectiveContextSize(200_000.0, null),
-        0.001,
-    );
-    try std.testing.expectApproxEqAbs(
-        @as(f64, 775_000.0),
-        effectiveContextSize(1_000_000.0, null),
+        @as(f64, 367_000.0),
+        (ContextCeiling{ .auto_compact_window = 400_000 }).tokens(1_000_000.0),
         0.001,
     );
 }
 
-test "effectiveContextSize honors a configured auto-compact window" {
+test "the reserve is flat, so a larger window keeps every extra token" {
+    // The superseded model took 22.5% of the window, which made the reserve grow
+    // with the window and cost 192k tokens of headroom at 1M. The client's
+    // reserve is two constants; scaling the window scales only usable context.
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 167_000.0),
+        (ContextCeiling{}).tokens(200_000.0),
+        0.001,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 967_000.0),
+        (ContextCeiling{}).tokens(1_000_000.0),
+        0.001,
+    );
+}
+
+test "the ceiling follows a configured auto-compact window" {
     // A 300k window on a 1M model: the ceiling follows the configured window,
-    // not the model's, so the gauge fills ~4.3x sooner than it otherwise would.
+    // not the model's, so the gauge fills ~3.6x sooner than it otherwise would.
     try std.testing.expectApproxEqAbs(
-        @as(f64, 232_500.0),
-        effectiveContextSize(1_000_000.0, 300_000),
+        @as(f64, 267_000.0),
+        (ContextCeiling{ .auto_compact_window = 300_000 }).tokens(1_000_000.0),
         0.001,
     );
 }
 
-test "effectiveContextSize clamps a configured window to the model window" {
+test "the ceiling clamps a configured window to the model window" {
     // The client never lets a configured window exceed what the model can hold.
     try std.testing.expectApproxEqAbs(
-        effectiveContextSize(200_000.0, null),
-        effectiveContextSize(200_000.0, 900_000),
+        (ContextCeiling{}).tokens(200_000.0),
+        (ContextCeiling{ .auto_compact_window = 900_000 }).tokens(200_000.0),
         0.001,
     );
+}
+
+test "a lowered max-output allowance raises the ceiling" {
+    // CLAUDE_CODE_MAX_OUTPUT_TOKENS below the 20k cap shrinks the reserve the
+    // client withholds, so the session gets that difference back.
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 378_808.0),
+        (ContextCeiling{ .auto_compact_window = 400_000, .output_reserve = 8_192 }).tokens(1_000_000.0),
+        0.001,
+    );
+}
+
+test "resolveOutputReserve caps at the client's own ceiling" {
+    // Unset, unparseable, non-positive, and above-cap values all land on the cap
+    // because the client caps the reserve regardless of the model's limit.
+    try std.testing.expectEqual(@as(i64, 20_000), resolveOutputReserve(null));
+    try std.testing.expectEqual(@as(i64, 20_000), resolveOutputReserve("64000"));
+    try std.testing.expectEqual(@as(i64, 20_000), resolveOutputReserve("garbage"));
+    try std.testing.expectEqual(@as(i64, 20_000), resolveOutputReserve(""));
+    try std.testing.expectEqual(@as(i64, 20_000), resolveOutputReserve("0"));
+    try std.testing.expectEqual(@as(i64, 20_000), resolveOutputReserve("-1"));
+    // Only a value below the cap actually moves it.
+    try std.testing.expectEqual(@as(i64, 8_192), resolveOutputReserve("8192"));
+    try std.testing.expectEqual(@as(i64, 8_192), resolveOutputReserve(" 8192\n"));
+}
+
+test "percentageOfCeiling clamps and refuses a non-positive ceiling" {
+    try std.testing.expectApproxEqAbs(@as(f64, 50.0), percentageOfCeiling(83_500.0, 167_000.0), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 100.0), percentageOfCeiling(999_999.0, 167_000.0), 0.001);
+    // A window under the client's reserve leaves nothing to divide by.
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), percentageOfCeiling(1_000.0, 0.0), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), percentageOfCeiling(1_000.0, -3_000.0), 0.001);
 }
 
 test "parseAutoCompactWindow accepts valid values and rejects the rest" {

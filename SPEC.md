@@ -50,7 +50,8 @@ stdin (JSON StatuslineInput)
 
 ### Key types (source: `src/main.zig`)
 
-- `StatuslineInput` — the stdin contract for supported producers. Fields are all optional. `context_window.used_percentage` is the preferred context source when no auto-compact window is configured; otherwise `context_window.current_usage` leads, with transcript parsing behind both (REQ-SL-052). Claude Code sends `used_percentage` as well as `current_usage`, so the ordering is load-bearing, not a Codex-only concern.
+- `StatuslineInput` — the stdin contract for supported producers. Fields are all optional. `ContextWindow` carries the producer's own accounting; its `context_window_size` is a raw model capacity with no auto-compact reserve removed, never the gauge's ceiling. `context_window.current_usage` token counts lead, `used_percentage` is the percentage-only fallback, and transcript parsing sits behind both (REQ-SL-052).
+- `ContextCeiling` — `{ auto_compact_window, output_reserve }`, resolved once per render so every usage path divides by the same number. `tokens(window_size)` returns the auto-compact threshold per REQ-SL-091.
 - `ActivityState` — hook-owned per-session state containing `working` / `idle`, `last_prompt_at`, `idle_since`, and `updated_at`. It lets the renderer show prompt and idle transitions without requiring producer statusline payload changes.
 - `ContextUsage` — `{ percentage, total_tokens }`. Renders a 5-char, 40-step eighth-block gauge with an RGB gradient (green → yellow → red).
 - `ModelType` — `opus | sonnet | haiku | fable | gpt56_sol | gpt56_terra | gpt56_luna | gpt55 | gpt54 | gpt54_mini | gpt53_codex_spark | codex | kimi | unknown`. Drives the model glyph (`🎭📜🍃🦊☀️🌍🌙🧠🔧⚡✨⌘🌑?`). `kimi` matches Kimi Code ids (`kimi-code/k3`) and bare Kimi version names on non-Kimi producers (`k3[1m]`, `Kimi K2`).
@@ -171,7 +172,16 @@ Historical context only. The statusline no longer parses this schema directly; `
 - **REQ-SL-055**: The short hostname comes from the `gethostname(2)` syscall (no subprocess), truncated at the first dot (drops `.local` and DNS domains). On syscall failure the host token is skipped (prefix degrades to `{session}@`).
 - **REQ-SL-056**: `{session}` is `ZMX_SESSION` (when non-empty) after `dedupeZmxSession` strips a leading/trailing worktree-leaf occurrence, capped at `max_zmx_display` (overflow truncates with `…`). When the session collapses to empty (it was just the leaf), the prefix is `{host}@` with no `/`. When the host is empty, the session renders without a leading `/`.
 - **REQ-SL-051**: Model segment (`{gauge} {emoji}`) is emitted when `input.model.display_name` is present. Claude models render with their Claude glyphs; recommended Codex model IDs render with model-specific glyphs (`gpt-5.6-sol` ☀️, `gpt-5.6-terra` 🌍, `gpt-5.6-luna` 🌙). Previous-generation Codex IDs retain their established glyphs (`gpt-5.5` 🧠, `gpt-5.4` 🔧, `gpt-5.4-mini` ⚡, `gpt-5.3-codex-spark` ✨); Kimi models (`kimi-code/*` ids, `Kimi K2`, bare version names such as `k3[1m]`) render with 🌑; other Codex/GPT display names render with `⌘`; unknown models render `?`.
-- **REQ-SL-052**: Context usage source depends on whether an auto-compact window is configured. With none, it prefers `context_window.used_percentage` when present — the producer computed it against the same ceiling the gauge uses, so it is authoritative and free. With one configured, that percentage is against the producer's own full window and therefore the wrong denominator, so exact `context_window.current_usage` token counts take precedence; a percentage-only producer has its figure re-based onto the effective ceiling rather than trusted verbatim. Either path falls back to parsing the transcript's last assistant message (max 100 lines / 512 KiB tail scan). Effective context size is 77.5% of the resolved window (22.5% autocompact reserve) when calculating from tokens. Returns 0% when unavailable.
+- **REQ-SL-052**: Context usage prefers exact `context_window.current_usage` token counts wherever a producer sends them, divided by the auto-compact ceiling (REQ-SL-091). A producer's `used_percentage` is never that ceiling's numerator: Claude Code divides by the raw model window with none of the reserve removed, so it under-reads the true position (30% where the session is at 82.6%), and it is rounded to whole percent besides — ±5000 tokens on a 1M window. A percentage-only producer is trusted verbatim, since it has no reserve to account for and its figure already answers "how full am I". With neither field present, fall back to parsing the transcript's last assistant message (max 100 lines / 512 KiB tail scan). Returns 0% when unavailable.
+- **REQ-SL-091**: The context gauge's ceiling is the token count at which the client auto-compacts:
+
+  ```
+  ceiling = min(model_window, configured_window)
+          - min(max_output_tokens, 20000)      // output allowance
+          - 13000                              // flat headroom
+  ```
+
+  Both reserves are flat token counts, not a share of the window, so a larger window yields a larger *usable* context rather than a larger buffer. Source: Claude Code 2.1.220, `toy` → `uFe` → `uMu` for the interactive path and `gJr` for the reactive/in-process paths; the client's own `/context` corroborates by reporting the two reserves added together as its "Autocompact buffer" line. The configured window resolves as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then `autoCompactWindow` from the generated settings file, clamped to the model window, with values under 100000 rejected as the client rejects them. `CLAUDE_CODE_MAX_OUTPUT_TOKENS` lowers the output allowance when set below its 20000 cap. A ceiling at or below zero reports 0% rather than dividing.
 - **REQ-SL-053**: Cost (`${usd}`), duration (`Nh|Nm|<1m`), and lines-changed (`+N/-N` in green/red) render when their source fields are present and non-zero. Rounding rules: `<$1 .2f`, `<$10 .1f`, `≥$10 integer`.
 - **REQ-SL-054**: Activity indicator is hook-owned. `UserPromptSubmit` writes `working` with `last_prompt_at` and renders as `💬{MM/DD HH:MM}`. `Stop` writes `idle` with `idle_since` and renders as `💤{MM/DD HH:MM}`. `SessionStart` clears state for that session. Render mode never infers activity from raw statusline payload changes and does not time out `working` state; long autonomous turns remain working until a lifecycle hook changes the state. `updated_at` is diagnostic metadata for state inspection.
 - **REQ-SL-059**: Codex goal attention renders only when `input.goal.status == "active"` or `input.goal.active == true`. The segment is `🎯active` when no counters exist, `🎯{tokens_used}` when only `tokens_used` exists, and `🎯{tokens_used}/{token_budget}` when both counters exist. Counts use compact `k`/`M` suffixes. Non-active, absent, or null goal payloads hide the segment.
@@ -241,6 +251,16 @@ Reasoning-effort badge (this change set — 2026-07-10):
 - [x] Tests observed red against stubbed scanners before implementation (5 failing/crashing), then `zig build test` green at 57/57.
 - [x] Fixture smoke: `test/codex.json` renders orange `xhigh` from display name, `test/codex-goal.json` renders dim `med`, `test/opus.json` renders yellow `high` from the structured field.
 
+Auto-compact ceiling correction (this change set — 2026-07-31):
+
+- [x] `auto_compact_arm_fraction` (0.775) and `effectiveContextSize` superseded by `ContextCeiling` and the two flat reserve constants (REQ-SL-091).
+- [x] `rebaseProducerPercentage` deleted; `contextUsageFromPayload` owns source selection (REQ-SL-052).
+- [x] `ContextWindow` extracted from the anonymous `StatuslineInput` field so source selection is unit-testable.
+- [x] `percentageOfCeiling` centralizes the clamp and refuses a non-positive ceiling.
+- [x] `CLAUDE_CODE_MAX_OUTPUT_TOKENS` honored via `resolveOutputReserve`; documented in `--help`.
+- [x] Test observed red against the pre-fix tree — `actual 310000, not within absolute tolerance 0.001 of expected 367000` — then `zig build test` green at 75/75.
+- [x] End-to-end on the payload that motivated the fix (1M model, `autoCompactWindow` 400000, 303100 tokens): released 0.3.2 renders `97.8%` at `38;2;255;11;0`, this build renders `82.6%` at `38;2;255;88;0`, matching the client's own `/context`.
+
 ## Risk tags
 
 - **LOW — local state only.** No schema migration, no auth, no infra. Blast radius is the statusline renderer and its neutral per-session state directory.
@@ -251,3 +271,4 @@ Reasoning-effort badge (this change set — 2026-07-10):
 
 - The `blocked_claimed` / `completion_claimed` flags from rl 1.0 are not surfaced. If `/rl:done` leaves `active == true` while setting these, the statusline will continue rendering the iteration segment. Revisit if the rl contract actually does this; otherwise treat as a non-goal (the Stop hook clears `active` on done).
 - Iteration-runtime indicator (`+Nm` derived from `iteration_start_ms`) is deferred (IMP-7) until concrete "stuck iteration" pain is observed.
+- Whether the REQ-SL-091 reserve applies to Codex is unverified. The reserve was read out of the Claude Code client; the Codex fork emits the same three fields (`current_usage`, `context_window_size`, `used_percentage`), so it takes the token path and inherits Claude's 33k reserve. `test/codex.json` cannot settle this — it is hand-built and internally inconsistent (52% against a 372000 window alongside a 15-token `current_usage`), so it proves only that the code matches the code. Settling it needs a payload captured from a real Codex TUI session; `STATUSLINE_CAPTURE_DIR=/tmp/codex-statusline-captures` is already wired in `~/.codex/config.toml`, and `codex exec` will not do (it renders no statusline). If Codex turns out to reserve nothing, source selection needs a producer discriminator rather than a field-presence check.
