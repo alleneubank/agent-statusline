@@ -43,13 +43,30 @@ const CurrentUsage = struct {
     output_tokens: ?i64 = null,
     cache_creation_input_tokens: ?i64 = null,
     cache_read_input_tokens: ?i64 = null,
+    /// Codex ships an authoritative context total; Claude Code ships none.
+    /// Its presence is what tells the two shapes apart (REQ-SL-092).
+    total_tokens: ?i64 = null,
 
-    /// Calculate total tokens from all fields
+    /// Tokens currently occupying the context window.
+    ///
+    /// Codex's total is authoritative and must not be recomputed: its
+    /// `input_tokens` follows OpenAI semantics and already contains
+    /// `cache_read_input_tokens`, so summing the fields counts every cached
+    /// token twice.
+    ///
+    /// Claude Code ships no total and its components are disjoint — the client
+    /// sums the same three itself — so summing is correct there.
     fn totalTokens(self: CurrentUsage) i64 {
+        if (self.total_tokens) |total| return @max(0, total);
         return (self.input_tokens orelse 0) +
             (self.output_tokens orelse 0) +
             (self.cache_creation_input_tokens orelse 0) +
             (self.cache_read_input_tokens orelse 0);
+    }
+
+    /// Whether this payload came from Codex, which owns its own reserve model.
+    fn isCodexShape(self: CurrentUsage) bool {
+        return self.total_tokens != null;
     }
 };
 
@@ -697,26 +714,35 @@ fn readAutoCompactWindowFromSettings(allocator: Allocator, io: std.Io, path: []c
 
 /// Pick the context usage a payload can support, given the resolved ceiling.
 ///
-/// Exact token counts win wherever a producer sends them. Claude Code always
-/// does, and its `used_percentage` is measured against the raw model window with
-/// none of the auto-compact reserve removed, so that figure reads far lower than
-/// the session's true position (REQ-SL-052).
+/// The two producers do not share a reserve model, so the shape decides
+/// (REQ-SL-092). Codex withholds a flat baseline from both the window and the
+/// used count and reports the result itself; that figure is its own answer to
+/// "how full am I", and re-basing it onto Claude's auto-compact ceiling would
+/// corrupt it. Claude Code's `used_percentage`, by contrast, divides by the raw
+/// model window with none of the reserve removed, so it reads far lower than the
+/// session's true position and its exact token counts must be used instead.
 ///
-/// A percentage-only producer — Codex — is trusted verbatim instead. It has no
-/// auto-compact reserve to account for, so its figure already answers "how full
-/// am I", and re-basing it onto Claude's ceiling would only corrupt it.
-///
-/// Returns `null` when the payload carries neither, which is the caller's signal
-/// to fall back to the transcript scan.
+/// Returns `null` when the payload supports neither, which is the caller's
+/// signal to fall back to the transcript scan.
 fn contextUsageFromPayload(ctx: ContextWindow, ceiling: ContextCeiling) ?ContextUsage {
     const window_size: f64 = @floatFromInt(ctx.context_window_size orelse default_context_window_size);
 
     if (ctx.current_usage) |current| {
-        const total_tokens = current.totalTokens();
-        return ContextUsage{
-            .percentage = percentageOfCeiling(@floatFromInt(total_tokens), ceiling.tokens(window_size)),
-            .total_tokens = @intCast(total_tokens),
-        };
+        if (current.isCodexShape()) {
+            // Codex always sends both; the percentage carries its reserve model.
+            if (ctx.used_percentage) |pct| {
+                return ContextUsage{
+                    .percentage = @min(100.0, @max(0.0, pct)),
+                    .total_tokens = @intCast(current.totalTokens()),
+                };
+            }
+        } else {
+            const total_tokens = current.totalTokens();
+            return ContextUsage{
+                .percentage = percentageOfCeiling(@floatFromInt(total_tokens), ceiling.tokens(window_size)),
+                .total_tokens = @intCast(total_tokens),
+            };
+        }
     }
 
     if (ctx.used_percentage) |pct| {
@@ -3081,6 +3107,56 @@ test "JSON parsing with current_usage field" {
         (ContextCeiling{}).tokens(200_000.0),
     );
     try std.testing.expectApproxEqAbs(@as(f64, 40.5), pct, 0.1);
+}
+
+test "a Codex total is authoritative and never summed" {
+    // Codex maps cache_read_input_tokens := usage.cached_input_tokens, which is
+    // a SUBSET of its input_tokens (OpenAI semantics — the fork's
+    // non_cached_input() is input_tokens - cached_input()). Summing the four
+    // fields therefore counts every cached token twice: 185000 instead of the
+    // 105000 Codex ships in total_tokens. Claude Code's components are disjoint
+    // and carry no total, so only it is summed.
+    const codex = CurrentUsage{
+        .input_tokens = 100_000,
+        .output_tokens = 5_000,
+        .cache_read_input_tokens = 80_000,
+        .cache_creation_input_tokens = 0,
+        .total_tokens = 105_000,
+    };
+    try std.testing.expectEqual(@as(i64, 105_000), codex.totalTokens());
+
+    const claude = CurrentUsage{
+        .input_tokens = 2,
+        .output_tokens = 246,
+        .cache_creation_input_tokens = 863,
+        .cache_read_input_tokens = 230_724,
+    };
+    try std.testing.expectEqual(@as(i64, 231_835), claude.totalTokens());
+}
+
+test "Codex keeps its own reserve model instead of inheriting Claude's" {
+    // Codex reserves BASELINE_TOKENS = 12000 from BOTH the window and the used
+    // count, then reports the result: with a 372000 window and 105000 tokens,
+    // remaining = (360000 - 93000) / 360000 = 74%, so used = 26%. Claude's 33k
+    // auto-compact reserve is a different model on a different denominator, and
+    // applying it here would read 31% against a 339000 ceiling.
+    const codex = ContextWindow{
+        .context_window_size = 372_000,
+        .used_percentage = 26.0,
+        .current_usage = .{
+            .input_tokens = 100_000,
+            .output_tokens = 5_000,
+            .cache_read_input_tokens = 80_000,
+            .total_tokens = 105_000,
+        },
+    };
+    const usage = contextUsageFromPayload(codex, .{}).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 26.0), usage.percentage, 0.001);
+    try std.testing.expectEqual(@as(u64, 105_000), usage.total_tokens);
+
+    // A resolved Claude window on the same host must not leak into it.
+    const with_claude_window = contextUsageFromPayload(codex, .{ .auto_compact_window = 400_000 }).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 26.0), with_claude_window.percentage, 0.001);
 }
 
 test "a percentage-only producer is trusted verbatim" {
