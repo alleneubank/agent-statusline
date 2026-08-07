@@ -1,0 +1,35 @@
+{
+  "hook_event_name": "Status",
+  "session_id": "grok-test",
+  "workspace": {
+    "current_dir": "/Users/allen/test",
+    "project_dir": "/Users/allen/test"
+  },
+  "model": {
+    "id": "grok-4",
+    "display_name": "Grok 4.5"
+  },
+  "effort": {
+    "level": "high"
+  },
+  "context_window": {
+    "current_usage": {
+      "input_tokens": 9300,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "total_tokens": 9300
+    },
+    "context_window_size": 500000,
+    "used_percentage": 2,
+    "total_input_tokens": 9300,
+    "total_output_tokens": 0,
+    "total_tokens": 9300
+  },
+  "permissions": {
+    "mode": "ask",
+    "label": "ask",
+    "yolo": false
+  },
+  "version": "1.0.0"
+}

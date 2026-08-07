@@ -165,6 +165,8 @@ const ModelType = enum {
     gpt53_codex_spark,
     codex,
     kimi,
+    // xAI Grok family (Grok Build / Claude Code / Codex display names and ids).
+    grok,
     unknown,
 
     fn fromName(name: []const u8) ModelType {
@@ -187,6 +189,9 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "kimi")) return .kimi;
         if (asciiContainsIgnoreCase(name, "k3")) return .kimi;
         if (asciiContainsIgnoreCase(name, "k2")) return .kimi;
+        // Grok Build sends display names like "Grok 4.5" / "Grok Build" and
+        // ids like "grok-4", "grok-build". Must precede Codex/GPT fallbacks.
+        if (asciiContainsIgnoreCase(name, "Grok")) return .grok;
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
@@ -194,7 +199,8 @@ const ModelType = enum {
 
     /// Emoji representation based on literal meaning
     /// Opus = grand musical work (theater), Sonnet = poem (scroll), Haiku = nature poem (leaf),
-    /// Fable = animal moral tale (fox, Aesop's storyteller)
+    /// Fable = animal moral tale (fox, Aesop's storyteller),
+    /// Grok = cosmic truth-seeking (milky way; xAI space brand, distinct from luna/kimi moons)
     fn emoji(self: ModelType) []const u8 {
         return switch (self) {
             .opus => "🎭",
@@ -212,6 +218,8 @@ const ModelType = enum {
             // New moon: Moonshot AI (月之暗面, "dark side of the moon");
             // distinct from luna's full 🌙.
             .kimi => "🌑",
+            // Milky Way: cosmic, xAI-aligned, not colliding with 🌙/🌑.
+            .grok => "🌌",
             .unknown => "?",
         };
     }
@@ -2273,6 +2281,10 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.kimi, ModelType.fromName("kimi-code/kimi-for-coding"));
     try std.testing.expectEqual(ModelType.kimi, ModelType.fromName("Kimi K2"));
     try std.testing.expectEqual(ModelType.kimi, ModelType.fromName("k3[1m]"));
+    try std.testing.expectEqual(ModelType.grok, ModelType.fromName("Grok 4.5"));
+    try std.testing.expectEqual(ModelType.grok, ModelType.fromName("Grok Build"));
+    try std.testing.expectEqual(ModelType.grok, ModelType.fromName("grok-4"));
+    try std.testing.expectEqual(ModelType.grok, ModelType.fromName("grok-build"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -2290,6 +2302,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("✨", ModelType.gpt53_codex_spark.emoji());
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("🌑", ModelType.kimi.emoji());
+    try std.testing.expectEqualStrings("🌌", ModelType.grok.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 
