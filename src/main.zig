@@ -104,7 +104,7 @@ const PermissionsInput = struct {
 /// Context accounting as a producer reports it. `context_window_size` is the
 /// model's own window with no auto-compact reserve removed, so it is a raw
 /// capacity, never the gauge's ceiling. Claude Code sends `used_percentage` and
-/// `current_usage` together; Codex sends the percentage alone.
+/// `current_usage` together; Codex and pi send the percentage alone.
 const ContextWindow = struct {
     total_input_tokens: ?i64 = null,
     total_output_tokens: ?i64 = null,
@@ -128,6 +128,14 @@ const StatuslineInput = struct {
     // parameter; reflects live mid-session /effort changes.
     effort: ?struct {
         level: ?[]const u8 = null,
+    } = null,
+    // Producer-declared auto-compact state, so a payload-driven producer like
+    // pi can show its own compaction mode and gauge ceiling without inheriting
+    // Claude Code's config. Claude Code does not send this and resolves its
+    // ceiling from env/settings instead.
+    auto_compact: ?struct {
+        enabled: ?bool = null,
+        window: ?i64 = null,
     } = null,
     session_id: ?[]const u8 = null,
     transcript_path: ?[]const u8 = null,
@@ -167,6 +175,7 @@ const ModelType = enum {
     kimi,
     // xAI Grok family (Grok Build / Claude Code / Codex display names and ids).
     grok,
+    deepseek,
     unknown,
 
     fn fromName(name: []const u8) ModelType {
@@ -192,6 +201,13 @@ const ModelType = enum {
         // Grok Build sends display names like "Grok 4.5" / "Grok Build" and
         // ids like "grok-4", "grok-build". Must precede Codex/GPT fallbacks.
         if (asciiContainsIgnoreCase(name, "Grok")) return .grok;
+        // DeepSeek reports ids like "DeepSeek-V4-Flash-0731" (pi) and
+        // "deepseek-chat" / "deepseek-reasoner" (direct API). The brand name
+        // is unambiguous: no other producer embeds it, and the DeepSeek id
+        // never collides with the glyph patterns above. Match the provider
+        // rather than the "Flash" family token, which would also catch Gemini
+        // Flash display names.
+        if (asciiContainsIgnoreCase(name, "deepseek")) return .deepseek;
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
@@ -220,8 +236,10 @@ const ModelType = enum {
             .kimi => "🌑",
             // Milky Way: cosmic, xAI-aligned, not colliding with 🌙/🌑.
             .grok => "🌌",
+            // Spouting whale: DeepSeek's whale brand mark; the name evokes
+            // deep-sea discovery.
+            .deepseek => "🐳",
             .unknown => "?",
-        };
     }
 };
 
@@ -652,6 +670,8 @@ const auto_compact_window_min: i64 = 100_000;
 const ContextCeiling = struct {
     /// Configured auto-compact window; `null` leaves the model's own window in force.
     auto_compact_window: ?i64 = null,
+    /// Producer-declared auto-compact mode; renders "(auto)" beside the gauge.
+    auto_compact_enabled: ?bool = null,
     /// The client's max-output allowance, already capped at its own ceiling.
     output_reserve: i64 = auto_compact_output_reserve_max,
 
@@ -2166,12 +2186,22 @@ pub fn main(init: std.process.Init) !void {
         if (model.display_name) |name| {
             const model_type = ModelType.fromName(name);
 
-            // A configured auto-compact window moves the gauge's ceiling, so resolve
-            // it the way the client does: env var first, then the generated settings
-            // file. The env branch costs no I/O; the settings read only happens when
-            // it is unset, and is far cheaper than the transcript scan below.
+            // A configured auto-compact window moves the gauge's ceiling, so
+            // resolve it the way the client does: the producer's declared
+            // window (pi) first, then env var, then the generated settings
+            // file. The env branch costs no I/O; the settings read only happens
+            // when both prior sources are empty, and is far cheaper than the
+            // transcript scan below. A payload window must win over ~/.claude
+            // settings: pi has no autoCompactWindow concept and must not
+            // inherit Claude Code's numbers.
             const ceiling: ContextCeiling = .{
+                .auto_compact_enabled = if (input.auto_compact) |ac| ac.enabled else null,
                 .auto_compact_window = acw: {
+                    if (input.auto_compact) |ac| {
+                        if (ac.window) |declared| {
+                            if (declared > 0) break :acw declared;
+                        }
+                    }
                     if (init.environ_map.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")) |raw| {
                         if (parseAutoCompactWindow(raw)) |configured| break :acw configured;
                     }
@@ -2204,6 +2234,11 @@ pub fn main(init: std.process.Init) !void {
             // Show percentage for debugging
             if (debug_mode) {
                 try writer.print(" {s}{d:.1}%", .{ colors.gray, usage.percentage });
+            }
+            // Auto-compact marker mirrors the clients' own position text:
+            // Claude Code renders "39% (auto)", pi's footer tags the same.
+            if (ceiling.auto_compact_enabled orelse false) {
+                try writer.print(" {s}(auto){s}", .{ colors.light_gray, colors.reset });
             }
             try writer.print(" {s}", .{model_type.emoji()});
 
@@ -2285,6 +2320,9 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.grok, ModelType.fromName("Grok Build"));
     try std.testing.expectEqual(ModelType.grok, ModelType.fromName("grok-4"));
     try std.testing.expectEqual(ModelType.grok, ModelType.fromName("grok-build"));
+    try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("DeepSeek-V4-Flash-0731"));
+    try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("deepseek-chat"));
+    try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("deepseek-reasoner"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -2299,6 +2337,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("🧠", ModelType.gpt55.emoji());
     try std.testing.expectEqualStrings("🔧", ModelType.gpt54.emoji());
     try std.testing.expectEqualStrings("⚡", ModelType.gpt54_mini.emoji());
+    try std.testing.expectEqualStrings("🐳", ModelType.deepseek.emoji());
     try std.testing.expectEqualStrings("✨", ModelType.gpt53_codex_spark.emoji());
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("🌑", ModelType.kimi.emoji());
@@ -3011,6 +3050,60 @@ test "formatLinesChanged function" {
     const input_no_cost = StatuslineInput{};
     const result_no_cost = try formatLinesChanged(input_no_cost, &writer);
     try std.testing.expect(!result_no_cost);
+}
+
+test "JSON parsing with auto_compact field" {
+    const allocator = std.testing.allocator;
+
+    const json_with_auto_compact =
+        \\{
+        \\  "hook_event_name": "Status",
+        \\  "session_id": "pi-1",
+        \\  "model": {
+        \\    "id": "DeepSeek-V4-Flash-0731",
+        \\    "display_name": "DeepSeek-V4-Flash-0731"
+        \\  },
+        \\  "context_window": {
+        \\    "context_window_size": 512000,
+        \\    "used_percentage": 1.8
+        \\  },
+        \\  "auto_compact": {
+        \\    "enabled": true,
+        \\    "window": 495616
+        \\  }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(StatuslineInput, allocator, json_with_auto_compact, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(true, parsed.value.auto_compact.?.enabled.?);
+    try std.testing.expectEqual(@as(i64, 495616), parsed.value.auto_compact.?.window.?);
+}
+
+test "payload auto_compact window positions the Claude-shape ceiling" {
+    // A payload-declared window acts as the gauge ceiling for totals-shaped
+    // producers, exactly as env/settings do for Claude Code — and must win
+    // over any ~/.claude settings on the host.
+    const ceiling = ContextCeiling{ .auto_compact_window = 495616 };
+    const ctx = ContextWindow{
+        .context_window_size = 512000,
+        .current_usage = .{
+            .input_tokens = 400000,
+            .output_tokens = 0,
+            .cache_creation_input_tokens = 0,
+            .cache_read_input_tokens = 0,
+        },
+    };
+
+    const usage = contextUsageFromPayload(ctx, ceiling) orelse
+        return error.TestFailedMissingUsage;
+    // 400000 tokens against ceiling 495616 - 33000 reserve = 462616 → ~86.5%.
+    // Against the raw 512000 window it would read ~78.1%, proving the window
+    // is in force.
+    try std.testing.expectApproxEqAbs(@as(f64, 86.5), usage.percentage, 1.0);
 }
 
 test "JSON parsing with full API structure" {

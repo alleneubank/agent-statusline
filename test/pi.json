@@ -1,0 +1,19 @@
+{
+  "hook_event_name": "Status",
+  "session_id": "pi-e2e",
+  "version": "0.0.0",
+  "workspace": { "current_dir": "/Users/allen/0xbigboss/pi-mono", "project_dir": "/Users/allen/0xbigboss/pi-mono" },
+  "model": {
+    "id": "DeepSeek-V4-Flash-0731",
+    "display_name": "DeepSeek-V4-Flash-0731"
+  },
+  "context_window": {
+    "context_window_size": 512000,
+    "used_percentage": 50.0
+  },
+  "cost": { "total_cost_usd": null, "total_duration_ms": 12000 },
+  "auto_compact": {
+    "enabled": true,
+    "window": 495616
+  }
+}

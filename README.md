@@ -15,7 +15,7 @@ A fast, single-line status renderer for command-backed agent statusline payloads
   without changing visible output.
 - `STATUSLINE_CAPTURE_DIR=/absolute/dir` writes replay artifacts for every render:
   `statusline-*.input.json` and `statusline-*.output.ansi`.
-- Claude Code, Codex, and Grok Build status payloads are supported. Claude models render with their existing glyphs; the GPT-5.6 family renders with model-specific glyphs (`gpt-5.6-sol` ☀️, `gpt-5.6-terra` 🌍, `gpt-5.6-luna` 🌙). Previous-generation Codex glyphs remain supported, with `⌘` as the generic GPT/Codex fallback. Kimi models (`kimi-code/*`, `k3[1m]`, `Kimi K2`) render as 🌑. Grok models (`Grok 4.5`, `Grok Build`, `grok-4`) render as 🌌.
+- Claude Code, Codex, and Grok Build status payloads are supported. Claude models render with their existing glyphs; the GPT-5.6 family renders with model-specific glyphs (`gpt-5.6-sol` ☀️, `gpt-5.6-terra` 🌍, `gpt-5.6-luna` 🌙). Previous-generation Codex glyphs remain supported, with `⌘` as the generic GPT/Codex fallback. Kimi models (`kimi-code/*`, `k3[1m]`, `Kimi K2`) render as 🌑. Grok models (`Grok 4.5`, `Grok Build`, `grok-4`) render as 🌌. DeepSeek models (`DeepSeek-*` display names, `deepseek-chat`/`deepseek-reasoner` ids) render as 🐳. An `(auto)` tag renders after the context gauge when the payload declares auto-compaction enabled (`auto_compact.enabled`, sent by the pi adapter); a percentage-only context payload (`used_percentage` without token buckets) is trusted verbatim.
 - Codex goal payloads render active goal attention as `🎯`; when `tokens_used` and `token_budget` are present, the segment renders compact progress such as `🎯12.5k/50k`.
 - Reasoning effort renders as an emoji dot dial after the model glyph, graded by compute burn: ⚫ minimal, ⚪ low, 🔵 medium, 🟡 high, 🟠 xhigh, 🔴 max, 🟣 ultra. An emoji badge aligns with the emoji model glyph beside it (partial-height block glyphs read as floating next to baseline-bound text). Claude Code's structured `effort.level` field is preferred; Codex effort is read from the model-with-reasoning display name (`gpt-5.6-sol xhigh`). Unset (`none`/`default`) or unknown effort hides the badge.
 - Activity display is hook-owned: the `agent-statusline` plugin records `UserPromptSubmit` as `💬 MM/DD HH:MM` and `Stop` as `💤 MM/DD HH:MM` under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
@@ -121,6 +121,39 @@ codex plugin add agent-statusline@agent-statusline
 For rapid local iteration, use a semver build suffix such as
 `0.2.2+codex.local-YYYYMMDD-HHMMSS` instead of bumping the release version for
 every edit.
+
+## Use with pi
+
+pi has no command-backed statusline contract; the footer is driven by the
+extension API. The adapter in [`pi/agent-statusline.ts`](pi/agent-statusline.ts)
+replaces pi's built-in footer with a custom footer whose single line is this
+renderer's output, so location, git, model glyph, effort, context gauge, and
+💬/💤 activity fit on one line:
+
+```bash
+pi -e /absolute/path/to/agent-statusline/pi/agent-statusline.ts
+```
+
+The adapter synthesizes a Codex/Claude-style payload from pi events: the model
+name (DeepSeek models resolve their glyph), pi's own `used_percentage`
+(percentage-only, trusted verbatim), and `auto_compact` derived from
+`~/.pi/settings.json` (`compaction.enabled`, default true) with a window of
+`contextWindow − 16384` — pi's own auto-compact trigger — so the `(auto)` tag
+matches pi's footer and no host `~/.claude` settings leak into the gauge. It
+tracks the same activity state as the CLI plugins via the renderer's
+`activity-hook`, and resolves the binary through `AGENT_STATUSLINE_BIN`, then
+the checkout's `zig-out/bin/statusline`. To persist, copy the file to
+`~/.pi/agent/extensions/agent-statusline.ts`.
+
+The same extension doubles as the sox attention emitter for pi sessions. Sox
+the command center is entirely submit-driven — a surface gets an envelope only
+when something emits — and pi has no hook system, so the extension submits
+what sox's claude-code plugin hook submits: `working` on `agent_start` (plus a
+heartbeat on every `tool_execution_start` so a tool-churning agent never ages
+into stale), `done` on `agent_settled`, and `--clear` on shutdown. The broker
+resolves from `SOX_ATTENTION_BIN` (absolute path only; the `sox` user CLI does
+not broker attention). Unset `SOX_ATTENTION_BIN` is a silent no-op, not
+misconfiguration. Debug via `SOX_ATTENTION_DEBUG=/abs/path.log`.
 
 ## Activity hook
 
