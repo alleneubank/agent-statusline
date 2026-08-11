@@ -240,6 +240,7 @@ const ModelType = enum {
             // deep-sea discovery.
             .deepseek => "🐳",
             .unknown => "?",
+        };
     }
 };
 
