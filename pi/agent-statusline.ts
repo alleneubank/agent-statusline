@@ -22,13 +22,14 @@
  *   pi -e /path/to/agent-statusline.ts
  *
  * The binary resolves the same way as the Claude/Codex plugin:
- *   AGENT_STATUSLINE_BIN env, then this checkout's zig-out/bin/statusline.
+ *   AGENT_STATUSLINE_BIN env, then `statusline` on PATH (the released mise
+ *   shim in the dotfiles fleet), then this checkout's zig-out/bin/statusline.
  */
 
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -40,6 +41,11 @@ const PI_COMPACTION_RESERVE_TOKENS = 16384;
 function resolveBinary(): string | undefined {
   const env = process.env.AGENT_STATUSLINE_BIN;
   if (env) return env;
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, "statusline");
+    if (existsSync(candidate)) return candidate;
+  }
   const fallback = join(
     homedir(),
     "0xbigboss",
@@ -185,7 +191,18 @@ export default function (pi: ExtensionAPI): void {
 
   /** Spawn the binary with the current payload; cache its line for the footer. */
   const renderStatus = (ctx: ExtensionContext): void => {
-    if (!BIN || ctx.mode !== "tui") return; // footer only exists in TUI mode
+    if (!BIN) return;
+    // The ctx captured by an async callback (the activity-hook child's close)
+    // goes stale once pi replaces or reloads the session; touching any ctx
+    // getter then throws. A stale ctx means the session that wanted this
+    // render is gone, so there is nothing to update — drop the render.
+    let mode: ExtensionContext["mode"];
+    try {
+      mode = ctx.mode;
+    } catch {
+      return;
+    }
+    if (mode !== "tui") return; // footer only exists in TUI mode
     const child = spawn(BIN, [], {
       stdio: ["pipe", "pipe", "ignore"],
       timeout: BIN_TIMEOUT_MS,
