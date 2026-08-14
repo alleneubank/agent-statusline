@@ -1,0 +1,52 @@
+# CI: run the checks that used to exist only on a developer's machine.
+#
+# Until this workflow existed the repository had no CI at all — `zig build test`
+# ran locally or not at all, and nothing compared the version-bearing files. Two
+# releases shipped skewed as a result (v0.3.6 and v0.3.7 carried plugin
+# manifests still reading 0.3.5), which is what scripts/check-versions.sh now
+# detects.
+#
+# Version consistency is checked here as well as in release.yml on purpose: the
+# release check fails after the tag already exists, so it prevents a bad release
+# but not a bad commit. This one fails on the commit that introduces the skew,
+# which is where it is cheap to fix.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          # Keep in lockstep with build.zig.zon's minimum_zig_version.
+          version: 0.16.0
+
+      - name: Check version consistency
+        run: scripts/check-versions.sh
+
+      - name: Unit tests
+        run: zig build test
+
+      - name: Render fixture payloads
+        # The renderer must not crash or go silent on any documented input
+        # shape. Codex hides empty output, so an empty render is a failure that
+        # would otherwise be invisible.
+        run: |
+          set -euo pipefail
+          zig build
+          for fixture in test/*.json; do
+            output="$(./zig-out/bin/statusline < "$fixture")"
+            if [[ -z "$output" ]]; then
+              echo "FAIL: $fixture rendered empty" >&2
+              exit 1
+            fi
+            printf '%-24s %s\n' "$fixture" "$output"
+          done

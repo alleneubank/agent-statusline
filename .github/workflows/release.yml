@@ -33,6 +33,13 @@ jobs:
           # Keep in lockstep with build.zig.zon's minimum_zig_version.
           version: 0.16.0
 
+      # Fail before building rather than after publishing. The tag names the
+      # assets and build.zig.zon names the binary inside them, so a disagreement
+      # ships a release whose parts describe different versions — which is what
+      # v0.3.6 and v0.3.7 did.
+      - name: Check version consistency
+        run: scripts/check-versions.sh --expect "${GITHUB_REF_NAME#v}"
+
       - name: Build release binaries
         run: |
           set -euo pipefail
