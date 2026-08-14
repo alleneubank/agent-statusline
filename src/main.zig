@@ -158,6 +158,74 @@ const StatuslineInput = struct {
     permissions: ?PermissionsInput = null,
 };
 
+/// Kimi Code statusline payload, as spawned by `status_line.command` in
+/// `~/.kimi-code/tui.toml`. Kimi's schema is flat and uses different names
+/// (`model` is a bare string, not an object), so it cannot share
+/// `StatuslineInput`'s parser: a known optional field with the wrong type is
+/// a parse error even under `ignore_unknown_fields`.
+const KimiStatuslineInput = struct {
+    model: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
+    gitBranch: ?[]const u8 = null,
+    permissionMode: ?[]const u8 = null,
+    planMode: ?bool = null,
+    /// Fraction of the window in use (0..1); redundant with the token pair.
+    contextUsage: ?f64 = null,
+    contextTokens: ?i64 = null,
+    maxContextTokens: ?i64 = null,
+    sessionId: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+};
+
+/// Kimi marks its statusline child with KIMI_CODE_STATUS_LINE=1; the
+/// `maxContextTokens` field is the payload-side tell when the env is absent
+/// (replay fixtures, captures, other producers forwarding a kimi snapshot).
+fn isKimiPayload(environ_map: *const std.process.Environ.Map, input_json: []const u8) bool {
+    if (envFlag(environ_map.get("KIMI_CODE_STATUS_LINE"))) return true;
+    return std.mem.indexOf(u8, input_json, "\"maxContextTokens\"") != null;
+}
+
+/// Translate a kimi snapshot onto the normalized input. Context maps to the
+/// Codex shape (authoritative total + producer percentage) so the gauge
+/// trusts kimi's own "how full am I" answer verbatim per REQ-SL-052, with no
+/// Claude reserve re-basing. `planMode` wins over `permissionMode` because the
+/// two are orthogonal upstream and plan is the more restrictive state.
+fn inputFromKimi(kimi: KimiStatuslineInput) StatuslineInput {
+    var input = StatuslineInput{};
+    if (kimi.cwd) |cwd| {
+        input.workspace = .{ .current_dir = cwd, .project_dir = cwd };
+    }
+    if (kimi.model) |model| {
+        input.model = .{ .id = model, .display_name = model };
+    }
+    input.session_id = kimi.sessionId;
+    input.version = kimi.version;
+    input.permission_mode = if (kimi.planMode orelse false) "plan" else kimi.permissionMode;
+
+    if (kimi.contextTokens) |used| {
+        if (kimi.maxContextTokens) |window| {
+            if (window > 0 and used >= 0) {
+                const pct = @as(f64, @floatFromInt(used)) * 100.0 / @as(f64, @floatFromInt(window));
+                input.context_window = .{
+                    .context_window_size = window,
+                    .used_percentage = pct,
+                    .current_usage = .{ .total_tokens = used },
+                };
+            }
+        }
+    }
+    if (input.context_window == null) {
+        if (kimi.contextUsage) |usage| {
+            if (usage >= 0.0) {
+                // 0..1 is a fraction; anything larger is already a percent.
+                const pct = if (usage <= 1.0) usage * 100.0 else usage;
+                input.context_window = .{ .used_percentage = pct };
+            }
+        }
+    }
+    return input;
+}
+
 /// Model type detection
 const ModelType = enum {
     opus,
@@ -2085,10 +2153,25 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const parsed = json.parseFromSlice(StatuslineInput, allocator, input_json, .{
-        .ignore_unknown_fields = true,
-    }) catch |err| {
-        appendDebug(io, debug_log_path, "Parse error: {any}", .{err});
+    const maybe_input: ?StatuslineInput = if (isKimiPayload(init.environ_map, input_json)) blk: {
+        const kimi_parsed = json.parseFromSlice(KimiStatuslineInput, allocator, input_json, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| {
+            appendDebug(io, debug_log_path, "Parse error: {any}", .{err});
+            break :blk null;
+        };
+        break :blk inputFromKimi(kimi_parsed.value);
+    } else blk: {
+        const parsed = json.parseFromSlice(StatuslineInput, allocator, input_json, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| {
+            appendDebug(io, debug_log_path, "Parse error: {any}", .{err});
+            break :blk null;
+        };
+        break :blk parsed.value;
+    };
+
+    const input = maybe_input orelse {
         var stdout_buffer: [256]u8 = undefined;
         var stdout_writer_wrapper = std.Io.File.stdout().writer(io, &stdout_buffer);
         const stdout = &stdout_writer_wrapper.interface;
@@ -2098,8 +2181,6 @@ pub fn main(init: std.process.Init) !void {
         stdout.flush() catch {};
         return;
     };
-
-    const input = parsed.value;
     const activity_state = readActivityStateForInput(allocator, io, state_dir, input);
 
     // Use a single buffer for the entire output
@@ -3105,6 +3186,74 @@ test "payload auto_compact window positions the Claude-shape ceiling" {
     // Against the raw 512000 window it would read ~78.1%, proving the window
     // is in force.
     try std.testing.expectApproxEqAbs(@as(f64, 86.5), usage.percentage, 1.0);
+}
+
+const kimi_json =
+    \\{
+    \\  "model": "K3",
+    \\  "cwd": "/work/kimi-code",
+    \\  "gitBranch": "main",
+    \\  "permissionMode": "auto",
+    \\  "planMode": false,
+    \\  "contextUsage": 0.25,
+    \\  "contextTokens": 262144,
+    \\  "maxContextTokens": 1048576,
+    \\  "sessionId": "kimi-e2e",
+    \\  "version": "0.35.0"
+    \\}
+;
+
+test "kimi payload translates onto the normalized input" {
+    const allocator = std.testing.allocator;
+    const parsed = try json.parseFromSlice(KimiStatuslineInput, allocator, kimi_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const input = inputFromKimi(parsed.value);
+    try std.testing.expectEqualStrings("/work/kimi-code", input.workspace.?.current_dir.?);
+    try std.testing.expectEqualStrings("K3", input.model.?.display_name.?);
+    try std.testing.expectEqual(ModelType.kimi, ModelType.fromName(input.model.?.display_name.?));
+    try std.testing.expectEqualStrings("kimi-e2e", input.session_id.?);
+    try std.testing.expectEqualStrings("0.35.0", input.version.?);
+    try std.testing.expectEqualStrings("auto", input.permission_mode.?);
+
+    // Token pair maps to the Codex shape: the producer's percentage is
+    // trusted verbatim (no Claude reserve re-base) and the total rides along
+    // for the debug readout. 262144/1048576 = 25%.
+    const ctx = input.context_window.?;
+    try std.testing.expect(ctx.current_usage.?.isCodexShape());
+    try std.testing.expectEqual(@as(i64, 262144), ctx.current_usage.?.totalTokens());
+    try std.testing.expectEqual(@as(i64, 1048576), ctx.context_window_size.?);
+    const usage = contextUsageFromPayload(ctx, ContextCeiling{}) orelse
+        return error.TestFailedMissingUsage;
+    try std.testing.expectApproxEqAbs(@as(f64, 25.0), usage.percentage, 0.01);
+    try std.testing.expectEqual(@as(u64, 262144), usage.total_tokens);
+}
+
+test "kimi planMode wins over permissionMode" {
+    const input = inputFromKimi(.{ .planMode = true, .permissionMode = "auto" });
+    try std.testing.expectEqualStrings("plan", input.permission_mode.?);
+}
+
+test "kimi contextUsage fraction is the percentage fallback" {
+    // No token pair: contextUsage 0..1 reads as a fraction of the window.
+    const input = inputFromKimi(.{ .contextUsage = 0.4 });
+    const ctx = input.context_window.?;
+    try std.testing.expect(ctx.current_usage == null);
+    const usage = contextUsageFromPayload(ctx, ContextCeiling{}) orelse
+        return error.TestFailedMissingUsage;
+    try std.testing.expectApproxEqAbs(@as(f64, 40.0), usage.percentage, 0.01);
+}
+
+test "kimi detection honors env and payload shape" {
+    var map = std.process.Environ.Map.init(std.testing.allocator);
+    defer map.deinit();
+
+    try std.testing.expect(isKimiPayload(&map, kimi_json));
+    try std.testing.expect(!isKimiPayload(&map, "{\"model\":{\"id\":\"x\"}}"));
+    try map.put("KIMI_CODE_STATUS_LINE", "1");
+    try std.testing.expect(isKimiPayload(&map, "{}"));
 }
 
 test "JSON parsing with full API structure" {

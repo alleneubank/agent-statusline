@@ -193,6 +193,8 @@ Historical context only. The statusline no longer parses this schema directly; `
 - **REQ-SL-093**: Auto-compact mode marker and producer-declared ceiling. When `input.auto_compact.enabled == true`, the context gauge renders a `(auto)` tag (light gray) directly after the gauge bar — mirroring Claude Code's `39% (auto)` and pi's own footer tag. Absent, `null`, or `false` hide the tag, leaving Claude Code and Codex payloads unchanged. The sibling `input.auto_compact.window` (any positive value, never clamped to the 100000 client floor) feeds the gauge ceiling (REQ-SL-091) ahead of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and the settings file, so a payload-driven producer never inherits another client's numbers.
 - **REQ-SL-057**: State location is neutral and overrideable. `STATUSLINE_STATE_DIR=/absolute/dir` wins when set. Otherwise `XDG_STATE_HOME/agent-statusline` is used when `XDG_STATE_HOME` is absolute. Otherwise the fallback is `~/.local/state/agent-statusline`. Missing or unwritable state directories fail open by hiding only the activity indicator.
 - **REQ-SL-058**: The bundled `agent-statusline` plugin provides the activity hooks for both Claude Code and Codex CLI. The hook wrapper locates the renderer through `AGENT_STATUSLINE_BIN`, `statusline` on `PATH`, or the repo-local build path.
+- **REQ-SL-094**: Kimi Code payloads are translated onto the normalized input before parsing. Kimi's schema is flat and its `model` is a bare string, so it cannot share `StatuslineInput`'s parser (a known field with the wrong type is a parse error even under `ignore_unknown_fields`). Detection is `KIMI_CODE_STATUS_LINE=1` in the environment (set by kimi's `status_line.command` spawner) or the `maxContextTokens` field in the raw JSON. The mapping: `model` → `model.{id,display_name}` (so `K3` renders 🌑 through the existing name match); `cwd` → `workspace.{current_dir,project_dir}`; `sessionId`/`version` → same-named fields; `planMode == true` overrides `permissionMode` into `permission_mode = "plan"` (plan is the more restrictive state, and the two are orthogonal upstream). Context maps to the Codex shape (REQ-SL-092): `contextTokens` → `current_usage.total_tokens`, `maxContextTokens` → `context_window_size`, and `used_percentage` computed as the ratio — kimi's own "how full am I" answer, trusted verbatim per REQ-SL-052 with no Claude reserve re-base. With no token pair, `contextUsage` is the percentage fallback (≤ 1.0 reads as a fraction, larger as an already-percent). A kimi payload that fails to parse degrades to the `~` fallback like any other (REQ-SL-002). Wire-up is `[status_line] command = "<path to statusline>"` in `~/.kimi-code/tui.toml`; kimi replaces its first footer line with the command's first stdout line.
+- **REQ-SL-095**: `gitBranch` in a kimi payload is ignored. The renderer already resolves branch and porcelain status from the workspace directory itself, and a producer-carried branch would go stale between renders.
 
 ## Acceptance criteria
 
@@ -287,6 +289,14 @@ DeepSeek model glyph (this change set — 2026-08-10):
 - [x] DeepSeek models render 🐳 (whale brand mark), distinct from kimi 🌑 and the Codex/GPT ⌘ fallback.
 - [x] Detection tests and emoji test observed red against the pre-change tree — `error: enum 'main.ModelType' has no member named 'deepseek'` (`zig build test` exit 1) — then `zig build test` green with the variant in place.
 - [x] pi adapter drives the renderer end-to-end in the pi TUI: `DeepSeek-V4-Flash-0731` shows 🐳 plus 💬/💤 activity and live context gauge.
+
+Kimi Code producer (this change set — 2026-08-13):
+
+- [x] `KimiStatuslineInput` + `inputFromKimi` translate kimi's flat `status_line.command` payload onto the normalized input (REQ-SL-094); `gitBranch` is deliberately dropped (REQ-SL-095).
+- [x] Detection by `KIMI_CODE_STATUS_LINE=1` env or the `maxContextTokens` payload tell (`isKimiPayload`); kimi's string `model` no longer risks a `StatuslineInput` parse error.
+- [x] Unit tests cover the token-pair mapping (Codex shape, 25% verbatim), `planMode` over `permissionMode`, the `contextUsage` fraction fallback, and both detection paths; `zig build test` green at 83/83.
+- [x] Fixture smoke: `test/kimi.json` renders the 🌑 glyph, `🛡auto` badge, and a 25% gauge; a live-shaped payload against a real repo renders path + `[main]` + gauge.
+- [x] Verified live in the kimi 0.36.0 TUI (`[status_line] command` in `~/.kimi-code/tui.toml`): first footer line is the renderer's output.
 
 ## Risk tags
 

@@ -155,6 +155,27 @@ resolves from `SOX_ATTENTION_BIN` (absolute path only; the `sox` user CLI does
 not broker attention). Unset `SOX_ATTENTION_BIN` is a silent no-op, not
 misconfiguration. Debug via `SOX_ATTENTION_DEBUG=/abs/path.log`.
 
+## Use with Kimi Code
+
+Kimi Code (0.35+) has a Claude-Code-style command statusline. Point
+`status_line.command` in `~/.kimi-code/tui.toml` at the renderer:
+
+```toml
+[status_line]
+command = "/absolute/path/to/zig-out/bin/statusline"
+```
+
+Kimi pipes a flat JSON snapshot on stdin (`model`, `cwd`, `gitBranch`,
+`permissionMode`, `planMode`, `contextTokens`, `maxContextTokens`,
+`sessionId`, `version`), marks the child with `KIMI_CODE_STATUS_LINE=1`, and
+replaces its first footer line with the command's first stdout line. The
+renderer detects the kimi shape (env mark or the `maxContextTokens` field) and
+translates it natively — no wrapper script. The context gauge trusts kimi's
+own token accounting verbatim (`contextTokens / maxContextTokens`, no Claude
+auto-compact reserve), `planMode` renders the green `🛡plan` badge, and
+`gitBranch` is ignored in favor of a live git read. Replay fixture:
+`test/kimi.json`.
+
 ## Activity hook
 
 The renderer also exposes a hook subcommand used by the plugin:

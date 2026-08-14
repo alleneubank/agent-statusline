@@ -1,0 +1,12 @@
+{
+  "model": "K3",
+  "cwd": "/Users/allen/0xbigboss/kimi-code",
+  "gitBranch": "main",
+  "permissionMode": "auto",
+  "planMode": false,
+  "contextUsage": 0.25,
+  "contextTokens": 262144,
+  "maxContextTokens": 1048576,
+  "sessionId": "kimi-e2e",
+  "version": "0.35.0"
+}
