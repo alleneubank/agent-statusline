@@ -29,8 +29,15 @@ jobs:
           # Keep in lockstep with build.zig.zon's minimum_zig_version.
           version: 0.16.0
 
+      # The pi extension is TypeScript; bun runs its behavioral test without
+      # this Zig repo needing a package.json or a node_modules tree.
+      - uses: oven-sh/setup-bun@v2
+
       - name: Check version consistency
         run: scripts/check-versions.sh
+
+      - name: pi extension compaction settings
+        run: ./pi/test-compaction-settings.sh
 
       - name: Unit tests
         run: zig build test

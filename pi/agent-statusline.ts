@@ -35,8 +35,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const BIN_TIMEOUT_MS = 1500;
 // pi's CompactionSettings.reserveTokens default; `shouldCompact` triggers at
-// contextWindow - reserveTokens (packages/coding-agent compaction.ts).
-const PI_COMPACTION_RESERVE_TOKENS = 16384;
+// contextWindow - reserveTokens (packages/coding-agent compaction.ts). Only a
+// fallback — readCompactionSettings prefers the configured value.
+const PI_COMPACTION_RESERVE_TOKENS_DEFAULT = 16384;
 
 function resolveBinary(): string | undefined {
   const env = process.env.AGENT_STATUSLINE_BIN;
@@ -59,17 +60,44 @@ function resolveBinary(): string | undefined {
 
 const BIN = resolveBinary();
 
-/** pi's auto-compaction enabled flag; fail open to the built-in default. */
-function readCompactionEnabled(): boolean {
+/**
+ * pi's settings file, resolved the way pi's own `getAgentDir()` does:
+ * $PI_CODING_AGENT_DIR (tilde-expanded) when set, else ~/.pi/agent.
+ *
+ * This previously read ~/.pi/settings.json, which pi has never written — so
+ * the file never existed, every read fell through to the defaults, and a host
+ * with compaction.enabled=false still rendered as auto-compacting.
+ */
+function piSettingsPath(): string {
+  const envDir = process.env.PI_CODING_AGENT_DIR;
+  if (envDir) {
+    const expanded = envDir.startsWith("~")
+      ? join(homedir(), envDir.slice(1))
+      : envDir;
+    return join(expanded, "settings.json");
+  }
+  return join(homedir(), ".pi", "agent", "settings.json");
+}
+
+/** pi's auto-compaction settings; fail open to pi's built-in defaults. */
+function readCompactionSettings(): { enabled: boolean; reserveTokens: number } {
+  const defaults = {
+    enabled: true,
+    reserveTokens: PI_COMPACTION_RESERVE_TOKENS_DEFAULT,
+  };
   try {
-    const path = join(homedir(), ".pi", "settings.json");
-    if (!existsSync(path)) return true;
+    const path = piSettingsPath();
+    if (!existsSync(path)) return defaults;
     const parsed = JSON.parse(readFileSync(path, "utf8")) as {
-      compaction?: { enabled?: boolean };
+      compaction?: { enabled?: boolean; reserveTokens?: number };
     };
-    return parsed.compaction?.enabled ?? true;
+    return {
+      enabled: parsed.compaction?.enabled ?? defaults.enabled,
+      reserveTokens:
+        parsed.compaction?.reserveTokens ?? defaults.reserveTokens,
+    };
   } catch {
-    return true;
+    return defaults;
   }
 }
 
@@ -127,6 +155,7 @@ const submitAttentionClear = (): void => runAttention(["--clear"]);
 /** Synthesize the statusline payload from pi's current context. */
 function buildPayload(ctx: ExtensionContext): unknown {
   const usage = ctx.getContextUsage();
+  const compaction = readCompactionSettings();
   return {
     hook_event_name: "Status",
     session_id: ctx.sessionManager.getSessionId() ?? "pi",
@@ -148,8 +177,8 @@ function buildPayload(ctx: ExtensionContext): unknown {
     // shouldCompact trigger so totals-shaped payloads (future producers)
     // position against the same ceiling pi compacts at.
     auto_compact: {
-      enabled: readCompactionEnabled(),
-      window: usage ? usage.contextWindow - PI_COMPACTION_RESERVE_TOKENS : null,
+      enabled: compaction.enabled,
+      window: usage ? usage.contextWindow - compaction.reserveTokens : null,
     },
     cost: { total_cost_usd: null, total_duration_ms: null },
     // pi has no goal concept; field kept for schema parity with Codex.
