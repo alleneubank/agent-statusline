@@ -244,6 +244,9 @@ const ModelType = enum {
     // xAI Grok family (Grok Build / Claude Code / Codex display names and ids).
     grok,
     deepseek,
+    // Zhipu/Z.ai GLM family (GLM-4.6 display names, glm-4.5 ids,
+    // zai/glm-4.6 producer paths, ChatGLM legacy names).
+    glm,
     unknown,
 
     fn fromName(name: []const u8) ModelType {
@@ -276,6 +279,11 @@ const ModelType = enum {
         // rather than the "Flash" family token, which would also catch Gemini
         // Flash display names.
         if (asciiContainsIgnoreCase(name, "deepseek")) return .deepseek;
+        // Zhipu/Z.ai GLM reports ids like "glm-4.6", "glm-4.5-air" and
+        // producer paths like "zai/glm-4.6"; legacy display names say
+        // "ChatGLM". The "glm" token is unambiguous: no other producer
+        // embeds it. Must precede the Codex/GPT fallbacks below.
+        if (asciiContainsIgnoreCase(name, "glm")) return .glm;
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
@@ -307,6 +315,9 @@ const ModelType = enum {
             // Spouting whale: DeepSeek's whale brand mark; the name evokes
             // deep-sea discovery.
             .deepseek => "🐳",
+            // Crystal ball: Zhipu (智谱) means "wisdom spectrum"; prescient
+            // wisdom, distinct from every other glyph in the set.
+            .glm => "🔮",
             .unknown => "?",
         };
     }
@@ -2405,6 +2416,11 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("DeepSeek-V4-Flash-0731"));
     try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("deepseek-chat"));
     try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("deepseek-reasoner"));
+    try std.testing.expectEqual(ModelType.glm, ModelType.fromName("glm-4.6"));
+    try std.testing.expectEqual(ModelType.glm, ModelType.fromName("glm-4.5"));
+    try std.testing.expectEqual(ModelType.glm, ModelType.fromName("glm-4.5-air"));
+    try std.testing.expectEqual(ModelType.glm, ModelType.fromName("zai/glm-4.6"));
+    try std.testing.expectEqual(ModelType.glm, ModelType.fromName("ChatGLM"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -2419,7 +2435,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("🧠", ModelType.gpt55.emoji());
     try std.testing.expectEqualStrings("🔧", ModelType.gpt54.emoji());
     try std.testing.expectEqualStrings("⚡", ModelType.gpt54_mini.emoji());
-    try std.testing.expectEqualStrings("🐳", ModelType.deepseek.emoji());
+    try std.testing.expectEqualStrings("🔮", ModelType.glm.emoji());
     try std.testing.expectEqualStrings("✨", ModelType.gpt53_codex_spark.emoji());
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("🌑", ModelType.kimi.emoji());
