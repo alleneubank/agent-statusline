@@ -88,6 +88,19 @@ const CodexGoal = struct {
 };
 
 /// Permission snapshot emitted by Codex custom statusline payloads.
+const NextTurnPermissionsInput = struct {
+    mode: ?[]const u8 = null,
+    label: ?[]const u8 = null,
+    approval_policy: ?[]const u8 = null,
+    approvals_reviewer: ?[]const u8 = null,
+    active_profile_id: ?[]const u8 = null,
+    active_profile_extends: ?[]const u8 = null,
+    file_system: ?[]const u8 = null,
+    network: ?[]const u8 = null,
+    enforcement: ?[]const u8 = null,
+    yolo: ?bool = null,
+};
+
 const PermissionsInput = struct {
     mode: ?[]const u8 = null,
     label: ?[]const u8 = null,
@@ -99,6 +112,7 @@ const PermissionsInput = struct {
     network: ?[]const u8 = null,
     enforcement: ?[]const u8 = null,
     yolo: ?bool = null,
+    next_turn: ?NextTurnPermissionsInput = null,
 };
 
 /// Context accounting as a producer reports it. `context_window_size` is the
@@ -1234,6 +1248,36 @@ fn codexExplicitPermissionDisplay(permissions: PermissionsInput) ?PermissionDisp
     return .{ .color = colors.yellow, .primary = mode };
 }
 
+fn nextTurnPermissionsInput(permissions: NextTurnPermissionsInput) PermissionsInput {
+    return .{
+        .mode = permissions.mode,
+        .label = permissions.label,
+        .approval_policy = permissions.approval_policy,
+        .approvals_reviewer = permissions.approvals_reviewer,
+        .active_profile_id = permissions.active_profile_id,
+        .active_profile_extends = permissions.active_profile_extends,
+        .file_system = permissions.file_system,
+        .network = permissions.network,
+        .enforcement = permissions.enforcement,
+        .yolo = permissions.yolo,
+    };
+}
+
+fn permissionDisplaysEqual(left: PermissionDisplay, right: PermissionDisplay) bool {
+    if (!std.mem.eql(u8, left.primary, right.primary)) return false;
+    if (left.secondary == null or right.secondary == null) {
+        return left.secondary == null and right.secondary == null;
+    }
+    return std.mem.eql(u8, left.secondary.?, right.secondary.?);
+}
+
+fn writePermissionDisplay(writer: anytype, display: PermissionDisplay) !void {
+    try writer.writeAll(display.primary);
+    if (display.secondary) |secondary| {
+        try writer.print("/{s}", .{secondary});
+    }
+}
+
 fn codexDisplay(approval_policy: ?[]const u8, sandbox_kind: ?[]const u8, permissions: ?PermissionsInput) ?PermissionDisplay {
     const approval = approvalLabel(approval_policy);
     const sandbox = if (permissions) |perms| profileSandboxLabel(perms) else sandboxLabel(sandbox_kind);
@@ -1278,9 +1322,18 @@ fn permissionDisplay(input: StatuslineInput) ?PermissionDisplay {
 fn formatPermissionMode(writer: anytype, input: StatuslineInput) !bool {
     const display = permissionDisplay(input) orelse return false;
 
-    try writer.print(" {s}🛡{s}{s}", .{ display.color, colors.light_gray, display.primary });
-    if (display.secondary) |secondary| {
-        try writer.print("/{s}", .{secondary});
+    try writer.print(" {s}🛡{s}", .{ display.color, colors.light_gray });
+    try writePermissionDisplay(writer, display);
+    if (input.permissions) |permissions| {
+        if (permissions.next_turn) |next_turn| {
+            if (codexExplicitPermissionDisplay(nextTurnPermissionsInput(next_turn))) |next_display| {
+                if (!permissionDisplaysEqual(display, next_display)) {
+                    try writer.writeAll("→");
+                    try writePermissionDisplay(writer, next_display);
+                    try writer.writeAll(" next");
+                }
+            }
+        }
     }
     try writer.writeAll(colors.reset);
     return true;
