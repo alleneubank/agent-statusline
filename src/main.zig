@@ -247,6 +247,8 @@ const ModelType = enum {
     // Zhipu/Z.ai GLM family (GLM-4.6 display names, glm-4.5 ids,
     // zai/glm-4.6 producer paths, ChatGLM legacy names).
     glm,
+    // Alibaba Qwen family (Qwen 3.8 display names and ids).
+    qwen,
     unknown,
 
     fn fromName(name: []const u8) ModelType {
@@ -284,6 +286,11 @@ const ModelType = enum {
         // "ChatGLM". The "glm" token is unambiguous: no other producer
         // embeds it. Must precede the Codex/GPT fallbacks below.
         if (asciiContainsIgnoreCase(name, "glm")) return .glm;
+        // Alibaba Qwen reports display names like "Qwen3.8" and ids like
+        // "qwen3.8" / "qwen-3.8-coder". The "qwen" token is unambiguous:
+        // no other producer embeds it. Must precede the Codex/GPT
+        // fallbacks below.
+        if (asciiContainsIgnoreCase(name, "qwen")) return .qwen;
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
@@ -318,6 +325,10 @@ const ModelType = enum {
             // Crystal ball: Zhipu (智谱) means "wisdom spectrum"; prescient
             // wisdom, distinct from every other glyph in the set.
             .glm => "🔮",
+            // Red question mark: Qwen is 通义千问 (Tongyi Qianwen), and
+            // 千问 literally means "thousand questions". Distinct from every
+            // other glyph in the set.
+            .qwen => "❓",
             .unknown => "?",
         };
     }
@@ -2421,6 +2432,9 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.glm, ModelType.fromName("glm-4.5-air"));
     try std.testing.expectEqual(ModelType.glm, ModelType.fromName("zai/glm-4.6"));
     try std.testing.expectEqual(ModelType.glm, ModelType.fromName("ChatGLM"));
+    try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("qwen3.8"));
+    try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("Qwen3.8"));
+    try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("qwen-3.8-coder"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -2440,6 +2454,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("🌑", ModelType.kimi.emoji());
     try std.testing.expectEqualStrings("🌌", ModelType.grok.emoji());
+    try std.testing.expectEqualStrings("❓", ModelType.qwen.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 
@@ -3806,6 +3821,34 @@ test "formatPermissionMode does not let partial top-level Codex fields mask nest
     var expected_buf: [128]u8 = undefined;
     var expected_writer = std.Io.Writer.fixed(&expected_buf);
     try expected_writer.print(" {s}🛡{s}never/full{s}", .{ colors.red, colors.light_gray, colors.reset });
+    try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
+}
+
+test "formatPermissionMode distinguishes active and next-turn Codex permissions" {
+    var buf: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const result = try formatPermissionMode(&writer, StatuslineInput{
+        .permissions = .{
+            .mode = "auto",
+            .label = "Auto",
+            .approval_policy = "on-request",
+            .approvals_reviewer = "auto_review",
+            .active_profile_id = ":workspace",
+            .file_system = "restricted",
+            .network = "restricted",
+            .yolo = false,
+            .next_turn = .{
+                .mode = "yolo",
+                .label = "YOLO",
+            },
+        },
+    });
+    try std.testing.expect(result);
+
+    var expected_buf: [128]u8 = undefined;
+    var expected_writer = std.Io.Writer.fixed(&expected_buf);
+    try expected_writer.print(" {s}🛡{s}auto→full next{s}", .{ colors.yellow, colors.light_gray, colors.reset });
     try std.testing.expectEqualStrings(expected_writer.buffered(), writer.buffered());
 }
 
