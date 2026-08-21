@@ -339,10 +339,11 @@ const ModelType = enum {
             // Crystal ball: Zhipu (智谱) means "wisdom spectrum"; prescient
             // wisdom, distinct from every other glyph in the set.
             .glm => "🔮",
-            // Red question mark: Qwen is 通义千问 (Tongyi Qianwen), and
-            // 千问 literally means "thousand questions". Distinct from every
-            // other glyph in the set.
-            .qwen => "❓",
+            // Dragon: Alibaba's Qwen (通义千问 Tongyi Qianwen) carries the
+            // Chinese heritage glyph. The literal 千问 "thousand questions"
+            // reading (❓) collided with the set's `?` unknown glyph and
+            // read as an identity bug, so it was retired in 0.3.12.
+            .qwen => "🐉",
             .unknown => "?",
         };
     }
@@ -2507,7 +2508,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("🌑", ModelType.kimi.emoji());
     try std.testing.expectEqualStrings("🌌", ModelType.grok.emoji());
-    try std.testing.expectEqualStrings("❓", ModelType.qwen.emoji());
+    try std.testing.expectEqualStrings("🐉", ModelType.qwen.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 
