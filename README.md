@@ -7,8 +7,9 @@ A fast, single-line status renderer for command-backed agent statusline payloads
 - Reads statusline JSON from stdin and ignores unknown fields.
 - Crash-free by design: any error in a segment degrades to hiding that segment, falling back to `~` in the worst case. A return code of `0` is always produced.
 - Empty segments emit zero bytes (no stray separators).
-- Renders host/working-directory and git segments from the current workspace, plus an rl loop segment.
+- Renders host/working-directory and git segments from the current workspace, plus delegated rl loop and typed mission segments.
 - The rl loop segment is delegated to `rl statusline` (a `PATH` dependency); the statusline does not read `.rl/` state directly.
+- When a git root contains both `MISSION.md` and `LOOP.md`, the mission segment is delegated to `missionctl statusline` (a `PATH` dependency). Invalid or unavailable mission state hides only that segment.
 - `--debug` or `STATUSLINE_DEBUG=1` appends diagnostics to `/tmp/statusline-debug.log`
   and shows the numeric context percentage inline.
 - `STATUSLINE_DEBUG_LOG=/absolute/path.log` appends diagnostics to that file
