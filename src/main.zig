@@ -2060,6 +2060,28 @@ fn appendBufferedReader(reader: *std.Io.Reader, dest: []u8, len: *usize) bool {
     return true;
 }
 
+fn appendBufferedReaderTracked(
+    reader: *std.Io.Reader,
+    dest: []u8,
+    len: *usize,
+    overflowed: *bool,
+) bool {
+    const buffered = reader.buffered();
+    if (buffered.len == 0) return false;
+
+    const remaining = dest.len - len.*;
+    const copied = @min(remaining, buffered.len);
+    if (copied > 0) {
+        @memcpy(dest[len.*..][0..copied], buffered[0..copied]);
+        len.* += copied;
+    }
+    overflowed.* = overflowed.* or buffered.len > copied;
+
+    // Drain beyond the retained cap so a noisy child cannot block the render.
+    reader.seek = reader.end;
+    return true;
+}
+
 fn rlSegmentShouldRender(term: std.process.Child.Term, stderr_seen: bool, stdout_len: usize) bool {
     if (stderr_seen or stdout_len == 0) return false;
     return switch (term) {
@@ -2149,6 +2171,118 @@ fn renderRlStatusline(
 
     try writer.writeByte(' ');
     try writer.writeAll(stdout_buf[0..stdout_len]);
+}
+
+fn missionArtifactsPresent(io: std.Io, git_root: []const u8) bool {
+    var mission_path_buf: [4096]u8 = undefined;
+    const mission_path = std.fmt.bufPrint(&mission_path_buf, "{s}/MISSION.md", .{git_root}) catch return false;
+    var mission_file = std.Io.Dir.openFileAbsolute(io, mission_path, .{}) catch return false;
+    mission_file.close(io);
+
+    var campaign_path_buf: [4096]u8 = undefined;
+    const campaign_path = std.fmt.bufPrint(&campaign_path_buf, "{s}/LOOP.md", .{git_root}) catch return false;
+    var campaign_file = std.Io.Dir.openFileAbsolute(io, campaign_path, .{}) catch return false;
+    campaign_file.close(io);
+    return true;
+}
+
+fn writeMissionSegmentOutput(
+    writer: anytype,
+    term: std.process.Child.Term,
+    stderr_seen: bool,
+    overflowed: bool,
+    stdout: []const u8,
+) !bool {
+    const successful = switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!successful or stderr_seen or overflowed) return false;
+
+    const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.indexOfAny(u8, trimmed, "\r\n") != null) return false;
+
+    try writer.writeByte(' ');
+    try writer.writeAll(trimmed);
+    return true;
+}
+
+/// Delegate the typed mission projection to its canonical reducer. The fast
+/// artifact presence gate in the caller keeps untyped repositories from paying
+/// the process cost. Invalid state and every process failure hide the segment.
+fn renderMissionStatusline(io: std.Io, writer: anytype, git_root: []const u8) !void {
+    const argv = [_][]const u8{ "missionctl", "statusline", "--root", git_root };
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    }) catch return;
+    var child_done = false;
+    defer if (!child_done) child.kill(io);
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_len: usize = 0;
+    var stdout_overflowed = false;
+    var stderr_buf: [256]u8 = undefined;
+    var stderr_len: usize = 0;
+    var stderr_overflowed = false;
+    var stderr_seen = false;
+
+    if (child.stdout == null or child.stderr == null) {
+        _ = child.wait(io) catch return;
+        child_done = true;
+        return;
+    }
+
+    var streams_storage: std.Io.File.MultiReader.Buffer(2) = undefined;
+    const streams = streams_storage.toStreams();
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    const files = [_]std.Io.File{ child.stdout.?, child.stderr.? };
+    multi_reader.init(std.heap.page_allocator, io, streams, &files);
+    defer multi_reader.deinit();
+
+    while (true) {
+        multi_reader.fill(1, .none) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => break,
+        };
+
+        _ = appendBufferedReaderTracked(
+            multi_reader.reader(0),
+            &stdout_buf,
+            &stdout_len,
+            &stdout_overflowed,
+        );
+        stderr_seen = appendBufferedReaderTracked(
+            multi_reader.reader(1),
+            &stderr_buf,
+            &stderr_len,
+            &stderr_overflowed,
+        ) or stderr_seen;
+    }
+    _ = appendBufferedReaderTracked(
+        multi_reader.reader(0),
+        &stdout_buf,
+        &stdout_len,
+        &stdout_overflowed,
+    );
+    stderr_seen = appendBufferedReaderTracked(
+        multi_reader.reader(1),
+        &stderr_buf,
+        &stderr_len,
+        &stderr_overflowed,
+    ) or stderr_seen;
+
+    const term = child.wait(io) catch return;
+    child_done = true;
+    _ = try writeMissionSegmentOutput(
+        writer,
+        term,
+        stderr_seen,
+        stdout_overflowed,
+        stdout_buf[0..stdout_len],
+    );
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -2332,6 +2466,9 @@ pub fn main(init: std.process.Init) !void {
                 defer allocator.free(git_root);
                 const git_head = getGitHead(allocator, io, current_dir.?);
                 try renderRlStatusline(io, &writer, git_root, git_head);
+                if (missionArtifactsPresent(io, git_root)) {
+                    try renderMissionStatusline(io, &writer, git_root);
+                }
             }
         }
     }
@@ -3965,6 +4102,54 @@ test "rl segment renders only on clean successful stdout" {
     try std.testing.expect(!rlSegmentShouldRender(.{ .signal = .TERM }, false, 1));
     try std.testing.expect(!rlSegmentShouldRender(.{ .exited = 0 }, true, 1));
     try std.testing.expect(!rlSegmentShouldRender(.{ .exited = 0 }, false, 0));
+}
+
+test "mission segment renders the canonical projection as one trimmed segment" {
+    var output_buf: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output_buf);
+
+    const rendered = try writeMissionSegmentOutput(
+        &writer,
+        .{ .exited = 0 },
+        false,
+        false,
+        "delivery E2E · floors passing · attention publish · iteration 4/8\n",
+    );
+
+    try std.testing.expect(rendered);
+    try std.testing.expectEqualStrings(
+        " delivery E2E · floors passing · attention publish · iteration 4/8",
+        writer.buffered(),
+    );
+}
+
+test "mission segment fails open on unsafe delegated output" {
+    const cases = [_]struct {
+        term: std.process.Child.Term,
+        stderr_seen: bool,
+        overflowed: bool,
+        output: []const u8,
+    }{
+        .{ .term = .{ .exited = 1 }, .stderr_seen = false, .overflowed = false, .output = "delivery DEV" },
+        .{ .term = .{ .exited = 0 }, .stderr_seen = true, .overflowed = false, .output = "delivery DEV" },
+        .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = true, .output = "delivery DEV" },
+        .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = false, .output = " \n\t" },
+        .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = false, .output = "delivery DEV\nsecond line" },
+    };
+
+    for (cases) |case| {
+        var output_buf: [64]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output_buf);
+        const rendered = try writeMissionSegmentOutput(
+            &writer,
+            case.term,
+            case.stderr_seen,
+            case.overflowed,
+            case.output,
+        );
+        try std.testing.expect(!rendered);
+        try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    }
 }
 
 test "current_usage field fallback when missing" {
