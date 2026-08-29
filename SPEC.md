@@ -337,3 +337,7 @@ Kimi Code producer (this change set — 2026-08-13):
 - The `blocked_claimed` / `completion_claimed` flags from rl 1.0 are not surfaced. If `/rl:done` leaves `active == true` while setting these, the statusline will continue rendering the iteration segment. Revisit if the rl contract actually does this; otherwise treat as a non-goal (the Stop hook clears `active` on done).
 - Iteration-runtime indicator (`+Nm` derived from `iteration_start_ms`) is deferred (IMP-7) until concrete "stuck iteration" pain is observed.
 - ~~Whether the REQ-SL-091 reserve applies to Codex is unverified.~~ **Settled 2026-07-31 from the Codex fork's source** (`rust-v0.144.4-fork.20260715.g36d685baf`): it does not. Codex owns a `BASELINE_TOKENS` model and ships an authoritative `total_tokens`; see REQ-SL-092. `test/codex.json` was rebuilt from `token_usage_payload` rather than guessed, and is now internally consistent.
+
+## Decisions
+
+- 2026-08-29 — The smoke script prepends the MISSIONCTL_BIN directory to PATH for the statusline run, because the renderer resolves missionctl from PATH and a mismatched binary produced a false red. **provisional (driver)**
