@@ -3,17 +3,17 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mission_root="${1:?usage: check-missionctl-smoke.sh MISSION_ROOT}"
+mission_root="${1:?usage: check-missionctl-smoke.sh LOOP_ROOT}"
 missionctl_bin="${MISSIONCTL_BIN:-missionctl}"
 statusline_bin="${STATUSLINE_BIN:-$repo_root/zig-out/bin/statusline}"
 
-if [[ ! -f "$mission_root/MISSION.md" || ! -f "$mission_root/LOOP.md" ]]; then
-  echo "typed mission artifacts not found at $mission_root" >&2
+if [[ ! -f "$mission_root/LOOP.md" ]]; then
+  echo "LOOP.md not found at $mission_root" >&2
   exit 1
 fi
 
 if [[ "$mission_root" == *['"'\\$'\n'$'\r']* ]]; then
-  echo "mission root cannot be represented by this smoke fixture: $mission_root" >&2
+  echo "loop root cannot be represented by this smoke fixture: $mission_root" >&2
   exit 1
 fi
 
@@ -33,6 +33,12 @@ trap 'rm -rf "$smoke_root"' EXIT
 cp -R "$mission_root/." "$smoke_root/"
 git -C "$smoke_root" init -q
 
+# The statusline resolves `missionctl` from PATH; compare against the same
+# binary that produced the canonical projection.
+if [[ "$missionctl_bin" == */* ]]; then
+  export PATH="$(cd "$(dirname "$missionctl_bin")" && pwd):$PATH"
+fi
+
 input="$(printf '{"workspace":{"current_dir":"%s","project_dir":"%s"}}' "$smoke_root" "$smoke_root")"
 rendered="$(printf '%s\n' "$input" | "$statusline_bin")"
 
@@ -43,4 +49,4 @@ if [[ "$rendered" != *" $canonical" ]]; then
   exit 1
 fi
 
-printf 'mission projection smoke passed: %s\n' "$canonical"
+printf 'loop projection smoke passed: %s\n' "$canonical"

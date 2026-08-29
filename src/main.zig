@@ -2173,16 +2173,13 @@ fn renderRlStatusline(
     try writer.writeAll(stdout_buf[0..stdout_len]);
 }
 
-fn missionArtifactsPresent(io: std.Io, git_root: []const u8) bool {
-    var mission_path_buf: [4096]u8 = undefined;
-    const mission_path = std.fmt.bufPrint(&mission_path_buf, "{s}/MISSION.md", .{git_root}) catch return false;
-    var mission_file = std.Io.Dir.openFileAbsolute(io, mission_path, .{}) catch return false;
-    mission_file.close(io);
-
-    var campaign_path_buf: [4096]u8 = undefined;
-    const campaign_path = std.fmt.bufPrint(&campaign_path_buf, "{s}/LOOP.md", .{git_root}) catch return false;
-    var campaign_file = std.Io.Dir.openFileAbsolute(io, campaign_path, .{}) catch return false;
-    campaign_file.close(io);
+/// A campaign is exactly one root `LOOP.md`; a mission file is optional and
+/// never gates the segment.
+fn loopArtifactPresent(io: std.Io, git_root: []const u8) bool {
+    var loop_path_buf: [4096]u8 = undefined;
+    const loop_path = std.fmt.bufPrint(&loop_path_buf, "{s}/LOOP.md", .{git_root}) catch return false;
+    var loop_file = std.Io.Dir.openFileAbsolute(io, loop_path, .{}) catch return false;
+    loop_file.close(io);
     return true;
 }
 
@@ -2207,9 +2204,10 @@ fn writeMissionSegmentOutput(
     return true;
 }
 
-/// Delegate the typed mission projection to its canonical reducer. The fast
-/// artifact presence gate in the caller keeps untyped repositories from paying
-/// the process cost. Invalid state and every process failure hide the segment.
+/// Delegate the loop projection to its canonical reducer. The fast `LOOP.md`
+/// presence gate in the caller keeps repositories without a campaign from
+/// paying the process cost. Invalid state and every process failure hide the
+/// segment.
 fn renderMissionStatusline(io: std.Io, writer: anytype, git_root: []const u8) !void {
     const argv = [_][]const u8{ "missionctl", "statusline", "--root", git_root };
     var child = std.process.spawn(io, .{
@@ -2466,7 +2464,7 @@ pub fn main(init: std.process.Init) !void {
                 defer allocator.free(git_root);
                 const git_head = getGitHead(allocator, io, current_dir.?);
                 try renderRlStatusline(io, &writer, git_root, git_head);
-                if (missionArtifactsPresent(io, git_root)) {
+                if (loopArtifactPresent(io, git_root)) {
                     try renderMissionStatusline(io, &writer, git_root);
                 }
             }
@@ -4113,12 +4111,12 @@ test "mission segment renders the canonical projection as one trimmed segment" {
         .{ .exited = 0 },
         false,
         false,
-        "delivery E2E · floors passing · attention publish · iteration 4/8\n",
+        "active E2E · unit U4 · gates 1 red · 2/6\n",
     );
 
     try std.testing.expect(rendered);
     try std.testing.expectEqualStrings(
-        " delivery E2E · floors passing · attention publish · iteration 4/8",
+        " active E2E · unit U4 · gates 1 red · 2/6",
         writer.buffered(),
     );
 }
@@ -4130,11 +4128,11 @@ test "mission segment fails open on unsafe delegated output" {
         overflowed: bool,
         output: []const u8,
     }{
-        .{ .term = .{ .exited = 1 }, .stderr_seen = false, .overflowed = false, .output = "delivery DEV" },
-        .{ .term = .{ .exited = 0 }, .stderr_seen = true, .overflowed = false, .output = "delivery DEV" },
-        .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = true, .output = "delivery DEV" },
+        .{ .term = .{ .exited = 1 }, .stderr_seen = false, .overflowed = false, .output = "active DEV" },
+        .{ .term = .{ .exited = 0 }, .stderr_seen = true, .overflowed = false, .output = "active DEV" },
+        .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = true, .output = "active DEV" },
         .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = false, .output = " \n\t" },
-        .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = false, .output = "delivery DEV\nsecond line" },
+        .{ .term = .{ .exited = 0 }, .stderr_seen = false, .overflowed = false, .output = "active DEV\nsecond line" },
     };
 
     for (cases) |case| {

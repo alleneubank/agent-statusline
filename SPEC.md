@@ -99,7 +99,7 @@ Historical context only. The statusline no longer parses this schema directly; `
 
 - **I-1 Single-line output.** Exactly one newline, at the end. No mid-line newlines.
 - **I-2 Crash-free.** Any error in any segment must be swallowed into "skip that segment" or, at worst, into the `~\n` fallback. A return code of 0 is always produced (subject to OS limits).
-- **I-3 Sub-process budget.** All `git` subprocess calls run against the workspace `current_dir`. Delegated `rl` and mission projections run at most once each against the resolved git root; the mission process is skipped unless both root artifacts exist. No network. Statusline producers are expected to hide or kill slow renders.
+- **I-3 Sub-process budget.** All `git` subprocess calls run against the workspace `current_dir`. Delegated `rl` and loop projections run at most once each against the resolved git root; the loop process is skipped unless a root `LOOP.md` exists. No network. Statusline producers are expected to hide or kill slow renders.
 - **I-4 State writes are scoped.** Render mode never writes to rl files, producer files, or the repo. Hook mode writes only small per-session activity files under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`. Debug/capture writes remain opt-in.
 - **I-5 File reads are bounded.** Every direct file read caps the byte count (512 KiB tail for transcripts). The delegated rl subprocess caps captured stdout at 1 KiB; the delegated mission subprocess caps it at 512 bytes and rejects overflow.
 - **I-6 Unknown fields are ignored.** All JSON parses use `ignore_unknown_fields = true`. Schema additions upstream must not break the statusline.
@@ -169,8 +169,8 @@ Historical context only. The statusline no longer parses this schema directly; `
 
 ### Typed mission segment
 
-- **REQ-SL-096** (canonical delegation): A git root containing both `MISSION.md` and `LOOP.md` adds the exact compact projection from `missionctl statusline --root <git_root>`, prefixed by one space. The renderer does not parse mission YAML, infer rubric state, or invent a score; `missionctl` remains the sole reducer.
-- **REQ-SL-097** (typed-root gate and fail-open): Repositories without both root artifacts add no mission process and no segment. Missing `missionctl`, spawn failure, non-zero exit, stderr output, empty/whitespace output, output overflow, or an embedded newline all hide the segment without affecting the rest of the statusline.
+- **REQ-SL-096** (canonical delegation): A git root containing `LOOP.md` adds the exact compact projection from `missionctl statusline --root <git_root>`, prefixed by one space. The renderer does not parse loop YAML, infer gate or unit state, or invent a score; `missionctl` remains the sole reducer, including its visible `loop invalid` and `loop legacy` degradations. A `.mission/mission.yaml` is optional and never gates the segment.
+- **REQ-SL-097** (loop-root gate and fail-open): Repositories without a root `LOOP.md` add no loop process and no segment. Missing `missionctl`, spawn failure, non-zero exit, stderr output, empty/whitespace output, output overflow, or an embedded newline all hide the segment without affecting the rest of the statusline.
 - **REQ-SL-098** (bounded single-line projection): Mission stdout is retained up to 512 bytes while both child pipes are fully drained. Leading/trailing ASCII whitespace, including the CLI's terminal newline, is removed; a second line is rejected to preserve I-1. Unit tests cover the accepted projection and every output rejection class. A cross-repository smoke compares the rendered substring to `missionctl statusline` for the same committed artifacts.
 
 ### Other segments (captured for traceability)
