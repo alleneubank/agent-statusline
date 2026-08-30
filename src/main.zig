@@ -310,6 +310,31 @@ const ModelType = enum {
         return .unknown;
     }
 
+    fn isCodex(self: ModelType) bool {
+        return switch (self) {
+            .gpt56_sol,
+            .gpt56_terra,
+            .gpt56_luna,
+            .gpt55,
+            .gpt54,
+            .gpt54_mini,
+            .gpt53_codex_spark,
+            .codex,
+            => true,
+            .opus,
+            .sonnet,
+            .haiku,
+            .fable,
+            .kimi,
+            .grok,
+            .deepseek,
+            .glm,
+            .qwen,
+            .unknown,
+            => false,
+        };
+    }
+
     /// Emoji representation based on literal meaning
     /// Opus = grand musical work (theater), Sonnet = poem (scroll), Haiku = nature poem (leaf),
     /// Fable = animal moral tale (fox, Aesop's storyteller),
@@ -426,6 +451,44 @@ fn resolveEffort(input: StatuslineInput) ?EffortLevel {
 fn formatEffort(writer: anytype, input: StatuslineInput) !bool {
     const level = resolveEffort(input) orelse return false;
     try writer.writeAll(level.meter());
+    return true;
+}
+
+/// User-facing service tiers embedded in Codex model display names. Codex
+/// accepts both "fast" and "priority" for Fast mode, while served responses
+/// normalize the tier to "priority"; both labels therefore map to one state.
+const ServiceTier = enum {
+    fast,
+
+    fn fromDisplayName(name: []const u8) ?ServiceTier {
+        var tokens = std.mem.tokenizeScalar(u8, name, ' ');
+        while (tokens.next()) |token| {
+            if (std.ascii.eqlIgnoreCase(token, "fast") or
+                std.ascii.eqlIgnoreCase(token, "priority"))
+            {
+                return .fast;
+            }
+        }
+        return null;
+    }
+
+    fn badge(self: ServiceTier) []const u8 {
+        return switch (self) {
+            .fast => "🚀",
+        };
+    }
+};
+
+fn resolveServiceTier(input: StatuslineInput) ?ServiceTier {
+    const model = input.model orelse return null;
+    const name = model.display_name orelse return null;
+    if (!ModelType.fromName(name).isCodex()) return null;
+    return ServiceTier.fromDisplayName(name);
+}
+
+fn formatServiceTier(writer: anytype, input: StatuslineInput) !bool {
+    const tier = resolveServiceTier(input) orelse return false;
+    try writer.writeAll(tier.badge());
     return true;
 }
 
@@ -2538,6 +2601,9 @@ pub fn main(init: std.process.Init) !void {
             // Effort meter attaches directly to the model glyph it grades
             _ = try formatEffort(&writer, input);
 
+            // Fast service tier attaches after the model's effort meter.
+            _ = try formatServiceTier(&writer, input);
+
             // Duration (space-separated, no bullets)
             if (input.cost != null and input.cost.?.total_duration_ms != null) {
                 try writer.print(" {s}", .{colors.light_gray});
@@ -3726,6 +3792,57 @@ test "CLI flag parsing ignores render-mode arguments" {
     try std.testing.expect(cliFlagMode("activity-hook") == null);
     try std.testing.expect(cliFlagMode("Stop") == null);
     try std.testing.expect(cliFlagMode("") == null);
+}
+
+test "ServiceTier recognizes Codex Fast aliases as exact tokens" {
+    try std.testing.expectEqual(ServiceTier.fast, ServiceTier.fromDisplayName("gpt-5.6-sol xhigh priority").?);
+    try std.testing.expectEqual(ServiceTier.fast, ServiceTier.fromDisplayName("gpt-5.6-terra medium fast").?);
+    try std.testing.expectEqual(ServiceTier.fast, ServiceTier.fromDisplayName("gpt-5.5 high PRIORITY").?);
+    try std.testing.expect(ServiceTier.fromDisplayName("gpt-5.6-sol xhigh ultrafast") == null);
+    try std.testing.expect(ServiceTier.fromDisplayName("gpt-5.6-sol xhigh default") == null);
+    try std.testing.expect(ServiceTier.fromDisplayName("gpt-5.6-sol xhigh fast-track") == null);
+}
+
+test "Fast tier resolves only for Codex models" {
+    const priority = StatuslineInput{
+        .model = .{ .display_name = "gpt-5.6-sol xhigh priority" },
+    };
+    try std.testing.expectEqual(ServiceTier.fast, resolveServiceTier(priority).?);
+
+    const fast_without_effort = StatuslineInput{
+        .model = .{ .display_name = "gpt-5.6-sol fast" },
+    };
+    try std.testing.expectEqual(ServiceTier.fast, resolveServiceTier(fast_without_effort).?);
+
+    const non_codex = StatuslineInput{
+        .model = .{ .display_name = "Claude Opus priority" },
+    };
+    try std.testing.expect(resolveServiceTier(non_codex) == null);
+    try std.testing.expect(resolveServiceTier(StatuslineInput{}) == null);
+}
+
+test "formatServiceTier renders the Fast badge without ANSI escapes" {
+    var buf: [16]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const rendered = try formatServiceTier(&writer, StatuslineInput{
+        .model = .{ .display_name = "gpt-5.6-sol xhigh priority" },
+    });
+
+    try std.testing.expect(rendered);
+    try std.testing.expectEqualStrings("🚀", writer.buffered());
+}
+
+test "formatServiceTier hides unavailable tiers without output" {
+    var buf: [16]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    const rendered = try formatServiceTier(&writer, StatuslineInput{
+        .model = .{ .display_name = "gpt-5.6-sol xhigh default" },
+    });
+
+    try std.testing.expect(!rendered);
+    try std.testing.expectEqualStrings("", writer.buffered());
 }
 
 test "version string is populated from the package manifest" {
