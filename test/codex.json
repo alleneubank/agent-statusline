@@ -8,8 +8,9 @@
   },
   "model": {
     "id": "gpt-5.6-sol",
-    "display_name": "gpt-5.6-sol xhigh priority"
+    "display_name": "gpt-5.6-sol xhigh"
   },
+  "service_tier": "priority",
   "context_window": {
     "current_usage": {
       "input_tokens": 100000,

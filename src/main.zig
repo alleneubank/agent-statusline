@@ -143,6 +143,10 @@ const StatuslineInput = struct {
     effort: ?struct {
         level: ?[]const u8 = null,
     } = null,
+    // Codex's effective service tier. When present this is authoritative over
+    // the legacy model-display-name token because it reflects live /fast
+    // changes without requiring the model label to encode the tier.
+    service_tier: ?[]const u8 = null,
     // Producer-declared auto-compact state, so a payload-driven producer like
     // pi can show its own compaction mode and gauge ceiling without inheriting
     // Claude Code's config. Claude Code does not send this and resolves its
@@ -454,20 +458,25 @@ fn formatEffort(writer: anytype, input: StatuslineInput) !bool {
     return true;
 }
 
-/// User-facing service tiers embedded in Codex model display names. Codex
-/// accepts both "fast" and "priority" for Fast mode, while served responses
-/// normalize the tier to "priority"; both labels therefore map to one state.
+/// User-facing Codex service tiers. Codex accepts both "fast" and "priority"
+/// for Fast mode, while served responses normalize the tier to "priority";
+/// both labels therefore map to one state.
 const ServiceTier = enum {
     fast,
+
+    fn fromLabel(label: []const u8) ?ServiceTier {
+        if (std.ascii.eqlIgnoreCase(label, "fast") or
+            std.ascii.eqlIgnoreCase(label, "priority"))
+        {
+            return .fast;
+        }
+        return null;
+    }
 
     fn fromDisplayName(name: []const u8) ?ServiceTier {
         var tokens = std.mem.tokenizeScalar(u8, name, ' ');
         while (tokens.next()) |token| {
-            if (std.ascii.eqlIgnoreCase(token, "fast") or
-                std.ascii.eqlIgnoreCase(token, "priority"))
-            {
-                return .fast;
-            }
+            if (ServiceTier.fromLabel(token)) |tier| return tier;
         }
         return null;
     }
@@ -483,6 +492,7 @@ fn resolveServiceTier(input: StatuslineInput) ?ServiceTier {
     const model = input.model orelse return null;
     const name = model.display_name orelse return null;
     if (!ModelType.fromName(name).isCodex()) return null;
+    if (input.service_tier) |label| return ServiceTier.fromLabel(label);
     return ServiceTier.fromDisplayName(name);
 }
 
@@ -3803,11 +3813,23 @@ test "ServiceTier recognizes Codex Fast aliases as exact tokens" {
     try std.testing.expect(ServiceTier.fromDisplayName("gpt-5.6-sol xhigh fast-track") == null);
 }
 
-test "Fast tier resolves only for Codex models" {
-    const priority = StatuslineInput{
+test "Fast tier prefers Codex structured service tier with legacy display-name fallback" {
+    const structured_priority = StatuslineInput{
+        .model = .{ .display_name = "gpt-5.6-sol xhigh" },
+        .service_tier = "priority",
+    };
+    try std.testing.expectEqual(ServiceTier.fast, resolveServiceTier(structured_priority).?);
+
+    const structured_default = StatuslineInput{
+        .model = .{ .display_name = "gpt-5.6-sol xhigh priority" },
+        .service_tier = "default",
+    };
+    try std.testing.expect(resolveServiceTier(structured_default) == null);
+
+    const legacy_priority = StatuslineInput{
         .model = .{ .display_name = "gpt-5.6-sol xhigh priority" },
     };
-    try std.testing.expectEqual(ServiceTier.fast, resolveServiceTier(priority).?);
+    try std.testing.expectEqual(ServiceTier.fast, resolveServiceTier(legacy_priority).?);
 
     const fast_without_effort = StatuslineInput{
         .model = .{ .display_name = "gpt-5.6-sol fast" },
@@ -3816,6 +3838,7 @@ test "Fast tier resolves only for Codex models" {
 
     const non_codex = StatuslineInput{
         .model = .{ .display_name = "Claude Opus priority" },
+        .service_tier = "priority",
     };
     try std.testing.expect(resolveServiceTier(non_codex) == null);
     try std.testing.expect(resolveServiceTier(StatuslineInput{}) == null);
