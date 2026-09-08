@@ -250,6 +250,7 @@ const ModelType = enum {
     sonnet,
     haiku,
     fable,
+    gpt6_astra,
     gpt56_sol,
     gpt56_terra,
     gpt56_luna,
@@ -274,6 +275,7 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "Sonnet")) return .sonnet;
         if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
         if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
+        if (asciiContainsIgnoreCase(name, "gpt-6-astra")) return .gpt6_astra;
         if (asciiContainsIgnoreCase(name, "gpt-5.6-sol")) return .gpt56_sol;
         if (asciiContainsIgnoreCase(name, "gpt-5.6-terra")) return .gpt56_terra;
         if (asciiContainsIgnoreCase(name, "gpt-5.6-luna")) return .gpt56_luna;
@@ -316,6 +318,7 @@ const ModelType = enum {
 
     fn isCodex(self: ModelType) bool {
         return switch (self) {
+            .gpt6_astra,
             .gpt56_sol,
             .gpt56_terra,
             .gpt56_luna,
@@ -349,6 +352,8 @@ const ModelType = enum {
             .sonnet => "📜",
             .haiku => "🍃",
             .fable => "🦊",
+            // Astra chose a shooting star for its celestial name.
+            .gpt6_astra => "🌠",
             .gpt56_sol => "☀️",
             .gpt56_terra => "🌍",
             .gpt56_luna => "🌙",
@@ -2721,6 +2726,22 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("🌌", ModelType.grok.emoji());
     try std.testing.expectEqualStrings("🐉", ModelType.qwen.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
+}
+
+test "Astra names render the shooting star and retain Codex Fast support" {
+    const names = [_][]const u8{
+        "gpt-6-astra",
+        "GPT-6-ASTRA",
+        "gpt-6-astra xhigh priority",
+    };
+    for (names) |name| {
+        try std.testing.expectEqualStrings("🌠", ModelType.fromName(name).emoji());
+        const input = StatuslineInput{
+            .model = .{ .display_name = name },
+            .service_tier = "priority",
+        };
+        try std.testing.expectEqual(ServiceTier.fast, resolveServiceTier(input));
+    }
 }
 
 test "EffortLevel fromLabel" {

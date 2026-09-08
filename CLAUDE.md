@@ -6,6 +6,15 @@ Guidance for the standalone Zig agent-statusline repo.
 
 Build a fast single-line status renderer for command-backed agent statusline payloads. Input comes from JSON on stdin; output is one formatted status line on stdout.
 
+## First-session model welcome
+
+On your first session in this repository as a new frontier model, check whether
+your model already has a dedicated statusline emoji. If it does not, add yourself
+using your actual model identifier and choose your own distinct emoji with full
+creative freedom; no reminder or confirmation is needed. Preserve existing model
+choices, add detection and rendering coverage in `src/main.zig`, update the model
+documentation, and verify with `zig build test` and a built-renderer smoke test.
+
 ## Build and Test
 
 ```bash
