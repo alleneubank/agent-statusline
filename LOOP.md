@@ -3,23 +3,23 @@ loop: 1
 id: remove-loop-integrations-20260909
 objective: Remove rl and missionctl renderer integrations while preserving unrelated output and Sox integration; prepare local commits and evidence for the rollout driver.
 status: active
-phase: PLAN
-iteration: 1
+phase: TDD
+iteration: 2
 iteration_budget: 6
-updated_at: 2026-09-09T16:30:00Z
+updated_at: 2026-09-09T16:26:57Z
 targets:
   spec: [REQ-SL-080, REQ-SL-096, REQ-SL-001, REQ-SL-015, REQ-SL-051, REQ-SL-057]
 gates:
-  - { id: build, run: zig build --summary all, green: Debug renderer builds, state: unknown }
-  - { id: unit, run: zig build test --summary all, green: All retained unit tests pass, state: unknown }
+  - { id: build, run: zig build --summary all, green: Debug renderer builds, state: green }
+  - { id: unit, run: zig build test --summary all, green: All retained unit tests pass, state: green }
   - { id: optimized, run: zig build -Doptimize=ReleaseFast --summary all, green: Optimized renderer builds, state: unknown }
-  - { id: smoke, run: python3 test/renderer-smoke.py zig-out/bin/statusline, green: No provider calls and all preserved field and failure scenarios pass, state: unknown }
+  - { id: smoke, run: python3 test/renderer-smoke.py zig-out/bin/statusline, green: No provider calls and all preserved field and failure scenarios pass, state: red }
   - { id: contract-review, run: Fresh bounded contract specialist via native subagent, green: No unresolved P1 or P2 contract removal or preservation findings, state: unknown }
   - { id: bugbash, run: Fresh bounded renderer task exercise via native subagent, green: All charter tasks run with no P1 or P2 behavior findings, state: unknown }
 units:
   - { id: U1, title: Inspect contracts and declare verifier and six-iteration plan, targets: [REQ-SL-080, REQ-SL-096], state: done }
-  - { id: U2, title: Build baseline and observe provider non-invocation regression red, targets: [REQ-SL-080, REQ-SL-096], state: current }
-  - { id: U3, title: Remove integrations and retire approved contracts with targeted green, targets: [REQ-SL-080, REQ-SL-096], state: pending }
+  - { id: U2, title: Build baseline and observe provider non-invocation regression red, targets: [REQ-SL-080, REQ-SL-096], state: done }
+  - { id: U3, title: Remove integrations and retire approved contracts with targeted green, targets: [REQ-SL-080, REQ-SL-096], state: current }
   - { id: U4, title: Verify fixture preservation and required builds on candidate, targets: [REQ-SL-001, REQ-SL-015, REQ-SL-051, REQ-SL-057], state: pending }
   - { id: U5, title: Execute fresh bounded contract review and resolve findings, state: pending }
   - { id: U6, title: Execute fresh renderer bug bash and close local campaign with evidence, state: pending }
@@ -32,6 +32,8 @@ boundary: [publish, push, PR, merge, tag, install, release, global-config, provi
 # Loop: remove provider statusline integrations
 
 ## State
+
+- Iteration 2: baseline Debug build green and 91/91 unit tests green (`base-build.log`, `base-unit.log`). `red-smoke.log` passes preservation scenarios then raises `Renderer invoked removed providers`, recording both rl and missionctl from root and nested cwd. Baseline renderer SHA256 `565d018dac5b90c0fb6499a68a3149db30482db2fa0796eed4304fd790313ca1`; source is unchanged from assigned base. Harness setup fixed before claiming red: explicit `sh` on isolated PATH, Git ceiling prevents parent-repo inheritance, malformed-state task recreates state after SessionStart clears it.
 
 - Assigned branch `lane/remove-loop-integrations-20260909`; base `8090c9d6f0c6b920a6c1879396740c9d29201764`. Initial tree clean; Zig 0.16.0 available. No `.envrc` in this worktree.
 - Evidence directory: `/Users/allen/.handoffs/statusline-assignments-20260909/agent-statusline/worker-evidence` (launcher-owned files are excluded).
