@@ -7,9 +7,7 @@ A fast, single-line status renderer for command-backed agent statusline payloads
 - Reads statusline JSON from stdin and ignores unknown fields.
 - Crash-free by design: any error in a segment degrades to hiding that segment, falling back to `~` in the worst case. A return code of `0` is always produced.
 - Empty segments emit zero bytes (no stray separators).
-- Renders host/working-directory and git segments from the current workspace, plus delegated rl loop and campaign loop segments.
-- The rl loop segment is delegated to `rl statusline` (a `PATH` dependency); the statusline does not read `.rl/` state directly.
-- When a git root contains `LOOP.md`, the loop segment is delegated to `missionctl statusline` (a `PATH` dependency); missionctl renders invalid or legacy loops as a visible degradation, and an unavailable `missionctl` hides only that segment.
+- Renders host/working-directory and git segments from the current workspace.
 - `--debug` or `STATUSLINE_DEBUG=1` appends diagnostics to `/tmp/statusline-debug.log`
   and shows the numeric context percentage inline.
 - `STATUSLINE_DEBUG_LOG=/absolute/path.log` appends diagnostics to that file
@@ -33,6 +31,7 @@ zig build run                      # run (reads JSON from stdin)
 zig build run -- --debug           # run with debug diagnostics
 zig build test                     # run unit tests
 zig build -Doptimize=ReleaseFast   # optimized build
+python3 test/renderer-smoke.py zig-out/bin/statusline  # isolated renderer smoke (Git + Python 3)
 ```
 
 Quick check:
