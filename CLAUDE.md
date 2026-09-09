@@ -38,7 +38,6 @@ zig build -Doptimize=ReleaseFast
 ## Data Sources
 
 - Git metadata is read from the current workspace directory.
-- Review/loop state is rendered by `rl statusline` (PATH dependency); the statusline does not read `.rl/state.json` directly.
 - Prompt/idle activity time is tracked by the bundled plugin hooks in neutral per-session state; render mode only reads that state.
 
 ## Guardrails

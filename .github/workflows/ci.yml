@@ -43,17 +43,9 @@ jobs:
         run: zig build test
 
       - name: Render fixture payloads
-        # The renderer must not crash or go silent on any documented input
-        # shape. Codex hides empty output, so an empty render is a failure that
-        # would otherwise be invisible.
+        # Assert preserved fields and provider independence through the built
+        # CLI with private Git and activity state for every documented fixture.
         run: |
           set -euo pipefail
           zig build
-          for fixture in test/*.json; do
-            output="$(./zig-out/bin/statusline < "$fixture")"
-            if [[ -z "$output" ]]; then
-              echo "FAIL: $fixture rendered empty" >&2
-              exit 1
-            fi
-            printf '%-24s %s\n' "$fixture" "$output"
-          done
+          python3 test/renderer-smoke.py zig-out/bin/statusline

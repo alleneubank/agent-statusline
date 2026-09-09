@@ -1,6 +1,6 @@
 # Statusline SPEC
 
-Retroactive specification for the Zig agent statusline renderer in this repo. Authored 2026-04-12 from the existing implementation in `src/main.zig` plus rl 1.0 alignment work.
+Retroactive specification for the Zig agent statusline renderer in this repo. Authored 2026-04-12 from the existing implementation in `src/main.zig`.
 
 ## Problem
 
@@ -8,19 +8,16 @@ Agent runtimes such as Claude Code and Codex can spawn a command-backed statusli
 
 - Turn a single JSON blob on stdin into a single terminal-formatted line on stdout.
 - Be fast enough to feel instantaneous on every agent turn (target: < 50 ms wall).
-- Surface the information the operator actually glances at mid-loop: where am I (path + branch), what's the agent doing (model, context gauge, cost, time), and what's the loop doing (rl iteration, review verdict / in-flight state).
+- Surface workspace location and Git changes, model and context usage, permission mode, native goal progress, cost, time, and hook-owned activity.
 - Never crash the rendering pipeline. A bad input, a missing file, or a dead subprocess degrades to a safe fallback (`~`), not a broken prompt.
-
-The rl CLI's 1.10 release added `rl statusline`, a first-class one-line renderer for loop state. The statusline now delegates that segment to the CLI instead of mirroring `.rl/state.json` or `.rl/jobs/*`. This spec retains the older direct-read requirements for traceability, but the active contract is the delegated 1.10+ path.
 
 ## Non-goals
 
 - Not a general-purpose prompt engine. The segment set is fixed; configuration lives in code.
 - Not a persistent daemon. One process per render; no background polling.
 - Not authoritative for any data source. Every data read is best-effort and may return null / empty.
-- Not responsible for the rl loop's decision logic. The Stop hook in `rl` owns verdict gating; the statusline only visualizes state.
 - No network I/O of any kind.
-- No schema migration or repair logic for rl loop state. `rl statusline` owns schema evolution; this renderer only shells out and renders stdout.
+- No rl or missionctl integration, loop-state parsing, or replacement loop projection.
 
 ## Domain model
 
@@ -39,8 +36,7 @@ stdin (JSON StatuslineInput)
 │                                                      │
 │  host/session@ prefix  (gethostname + $ZMX_SESSION)  │
 │  path + branch + git-status                          │
-│  rl loop segment       (from `rl statusline`)        │
-│  mission segment        (from `missionctl statusline`)│
+│  native goal + permission mode (stdin fields)         │
 │  model + gauge + effort + cost + duration + lines    │
 │  activity time         (hook-owned neutral state)            │
 └──────┬───────────────────────────────────────────────┘
@@ -62,47 +58,13 @@ stdin (JSON StatuslineInput)
 - `PermissionsInput` — optional Codex permission snapshot containing explicit `mode` / `label`, `approval_policy`, approval reviewer, active profile identity, filesystem/network labels, enforcement, `yolo`, and an optional `next_turn` snapshot. The renderer also accepts top-level Codex `approval_policy` / `sandbox_policy` fields and a best-effort `permission_mode` compatibility fallback for Claude-like producers.
 - `GitStatus` — `{ added, modified, deleted, untracked }`. Parsed from `git status --porcelain`.
 
-### rl 1.0 state schema (source: `~/0xbigboss/rl/SPEC.md:387-418`)
-
-```typescript
-interface LoopState {
-  version: 3
-  strategy: 'ralph' | 'review' | 'research'
-  active: boolean
-  iteration: number
-  max_iterations: number
-  timestamp: string
-
-  review_enabled: boolean
-  review_count: number
-  max_review_cycles: number
-
-  review_verdict: 'approve' | 'reject' | null
-  review_verdict_sha: string | null
-  review_verdict_ts: string | null
-  review_verdict_job_id: string | null
-  review_in_flight_job_id: string | null
-
-  metric_name?: string
-  metric_direction?: 'minimize' | 'maximize'
-  best_metric_value?: number
-  best_metric_commit?: string
-
-  completion_claimed?: boolean
-  blocked_claimed?: boolean
-  debug: boolean
-}
-```
-
-Historical context only. The statusline no longer parses this schema directly; `rl statusline` owns it.
-
 ## Invariants
 
 - **I-1 Single-line output.** Exactly one newline, at the end. No mid-line newlines.
 - **I-2 Crash-free.** Any error in any segment must be swallowed into "skip that segment" or, at worst, into the `~\n` fallback. A return code of 0 is always produced (subject to OS limits).
-- **I-3 Sub-process budget.** All `git` subprocess calls run against the workspace `current_dir`. Delegated `rl` and loop projections run at most once each against the resolved git root; the loop process is skipped unless a root `LOOP.md` exists. No network. Statusline producers are expected to hide or kill slow renders.
-- **I-4 State writes are scoped.** Render mode never writes to rl files, producer files, or the repo. Hook mode writes only small per-session activity files under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`. Debug/capture writes remain opt-in.
-- **I-5 File reads are bounded.** Every direct file read caps the byte count (512 KiB tail for transcripts). The delegated rl subprocess caps captured stdout at 1 KiB; the delegated mission subprocess caps it at 512 bytes and rejects overflow.
+- **I-3 Sub-process budget.** All `git` subprocess calls run against the workspace `current_dir`. No network. Statusline producers are expected to hide or kill slow renders.
+- **I-4 State writes are scoped.** Render mode never writes to producer files or the repo. Hook mode writes only small per-session activity files under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`. Debug/capture writes remain opt-in.
+- **I-5 File reads are bounded.** Every direct file read caps the byte count (512 KiB tail for transcripts).
 - **I-6 Unknown fields are ignored.** All JSON parses use `ignore_unknown_fields = true`. Schema additions upstream must not break the statusline.
 - **I-7 Empty segments are hidden.** A segment that has nothing interesting to say emits zero bytes (not even a leading space).
 
@@ -118,61 +80,32 @@ Historical context only. The statusline no longer parses this schema directly; `
 
 ### Workspace segment
 
-- **REQ-SL-010**: When `workspace.current_dir` is missing, emit `~` and skip all workspace-dependent segments (git, rl).
+- **REQ-SL-010**: When `workspace.current_dir` is missing, emit `~` and skip all workspace-dependent Git segments.
 - **REQ-SL-011**: When `current_dir` is present, render the path via `formatPathShort` — home-relative, abbreviating intermediate segments on long paths, last segment full.
 - **REQ-SL-012**: When `current_dir` is inside a git repo, detect this via `git rev-parse --is-inside-work-tree` and enable git-dependent segments.
 - **REQ-SL-013**: When the git branch equals the last path segment, color the last path segment green and skip the `[branch]` display. Otherwise render `[branch]` (abbreviated via `abbreviateBranch`).
 - **REQ-SL-014**: Abbreviation rules for branches: Linear-issue pattern (`PREFIX-NNNN[-suffix]`) truncates to `PREFIX-NNNN`. Other branches get the per-segment `abbreviateSegment` treatment (first letter per hyphen-separated token, `0x`-prefixed tokens keep three chars).
 - **REQ-SL-015**: Git status indicators (`+N ~N -N ?N`) render inside the same bracket pair as the branch when any are non-zero.
 
-### rl loop segment (pre-1.0 — captured for baseline)
+### Retired integration requirements
 
-- **REQ-SL-020** (SUPERSEDED by REQ-SL-080; pre-1.0): Read `{git_root}/.rl/state.json` as JSON (first 4 KiB) into `RalphState`.
-- **REQ-SL-021** (SUPERSEDED by REQ-SL-080; pre-1.0): When `state.active == false`, emit nothing.
-- **REQ-SL-022** (SUPERSEDED by REQ-SL-080; pre-1.0): Render an iteration counter from mirrored loop state.
-- **REQ-SL-023** (SUPERSEDED by REQ-SL-080; pre-1.0): Render a review counter from mirrored loop state when reviews are enabled.
-- **REQ-SL-024** (SUPERSEDED by REQ-SL-080; pre-1.0): Read `{git_root}/.claude/codex-review.local.md` for a standalone review segment.
+The rl and missionctl renderer integrations are removed. Their identifiers remain
+reserved for traceability; Git history contains the retired contracts.
 
-### rl loop segment (rl 1.0 — initial cut, superseded by REQ-SL-060s)
+- **REQ-SL-020**, **REQ-SL-021**, **REQ-SL-022**, **REQ-SL-023**, **REQ-SL-024**: RETIRED — direct loop/review state rendering.
+- **REQ-SL-030**, **REQ-SL-031**, **REQ-SL-032**, **REQ-SL-033**, **REQ-SL-034**, **REQ-SL-035**, **REQ-SL-036**, **REQ-SL-037**, **REQ-SL-038**, **REQ-SL-039**: RETIRED — mirrored rl state rendering.
+- **REQ-SL-061**, **REQ-SL-062**, **REQ-SL-063**, **REQ-SL-064**, **REQ-SL-065**, **REQ-SL-066**, **REQ-SL-067**, **REQ-SL-068**, **REQ-SL-069**, **REQ-SL-070**, **REQ-SL-071**: RETIRED — strategy, verdict, metric, age, and worker rendering. The historical loop-state use of REQ-SL-060 is also retired; its existing active permission-mode requirement below is preserved.
+- **REQ-SL-080**, **REQ-SL-081**, **REQ-SL-082**, **REQ-SL-083**: RETIRED — delegated rl statusline integration and verification policy.
+- **REQ-SL-096**, **REQ-SL-097**, **REQ-SL-098**: RETIRED — delegated missionctl statusline integration and smoke.
 
-- **REQ-SL-030** (SUPERSEDED by REQ-SL-080): Parse `.rl/state.json` v3 fields needed for the rl segment.
-- **REQ-SL-031** (SUPERSEDED by REQ-SL-080): Hide the rl segment when `state.active == false`.
-- **REQ-SL-032** (SUPERSEDED by REQ-SL-080): Dispatch the leading glyph from `strategy`.
-- **REQ-SL-033** (SUPERSEDED by REQ-SL-080): Render an unconditional iteration counter for ralph + review.
-- **REQ-SL-034** (SUPERSEDED by REQ-SL-080): Render a review counter for `ralph` / `review` when `review_enabled == true`.
-- **REQ-SL-035** (SUPERSEDED by REQ-SL-080): Render a verdict state glyph from mirrored state.
-- **REQ-SL-036** (SUPERSEDED by REQ-SL-080): Render research metrics from mirrored state.
-- **REQ-SL-037** (SUPERSEDED by REQ-SL-080): Apply HEAD-staleness behavior inside the statusline.
-- **REQ-SL-038** (SUPERSEDED by REQ-SL-080): Parse `state.version` and emit debug drift diagnostics.
-- **REQ-SL-039** (SUPERSEDED by REQ-SL-080): Thread an allocator through rl-state JSON parsing helpers.
+### Provider independence
 
-### rl loop segment (rl 1.1 — strategy-aware, orphan-aware)
+- **REQ-SL-100**: Rendering never invokes `rl` or `missionctl`, reads their loop artifacts, or adds a replacement loop segment. This holds regardless of executable availability or the presence of `.rl/`, `LOOP.md`, or `.mission/` artifacts. Path/Git, model/context, permissions, activity, native goal fields, and unrelated output retain their existing contracts; Sox attention and the delegate wrapper remain outside this removal.
 
-- **REQ-SL-060** (SUPERSEDED by REQ-SL-080): Parse additional loop-state fields (`completion_claimed`, `blocked_claimed`, `metric_direction`, `iteration_start_ms`).
-- **REQ-SL-061** (SUPERSEDED by REQ-SL-080): Dispatch layout by `strategy`.
-- **REQ-SL-062** (SUPERSEDED by REQ-SL-080): Render terminal-state prefixes from mirrored loop flags.
-- **REQ-SL-063** (SUPERSEDED by REQ-SL-080): Resolve verdict glyphs by reading `.rl/jobs/*` and comparing `review_verdict_sha` to `git HEAD`.
-- **REQ-SL-064** (SUPERSEDED by REQ-SL-080): Render research metrics with direction arrows.
-- **REQ-SL-065** (SUPERSEDED by REQ-SL-080): Render loop age from `iteration_start_ms`.
-- **REQ-SL-066** (SUPERSEDED by REQ-SL-080): Read `{git_root}/.rl/jobs/{job_id}.json` to derive job state.
-- **REQ-SL-067** (SUPERSEDED by REQ-SL-080): Probe `git HEAD` for verdict staleness checks.
-- **REQ-SL-068** (SUPERSEDED by REQ-SL-080): Maintain strategy-coupled fixture coverage for mirrored rl logic.
-- **REQ-SL-069** (SUPERSEDED by REQ-SL-080): Maintain rl-specific glyph constants in `src/main.zig`.
-- **REQ-SL-070** (SUPERSEDED by REQ-SL-080): Detect impl workers by scanning `.rl/jobs/` directly.
-- **REQ-SL-071** (SUPERSEDED by REQ-SL-080): Accept workspaces that show an impl glyph without `.rl/state.json`.
-
-### rl loop segment (rl 1.10+ — delegated to rl statusline)
-
-- **REQ-SL-080** (delegation): The rl loop segment is produced by shelling out to `rl statusline --format text --cwd <git_root> [--git-head <sha>]`. The statusline emits the subprocess's stdout verbatim, prefixed by a single space. No parsing, no post-processing, no knowledge of `.rl/state.json` or `.rl/jobs/*` remains in the statusline codebase. Source of truth: `rl` CLI owns the schema, the renderer, and the strategy dispatch. Reference: 0xsend/rl#6.
-- **REQ-SL-081** (fail-open): Missing `rl` binary (PATH lookup failure), spawn failure, non-zero exit, or stderr output MUST all collapse to "emit nothing" (invariants I-2, I-7). No crash, no fallback glyph, no log spam outside `--debug` mode.
-- **REQ-SL-082** (subprocess budget): The rl segment adds exactly one subprocess call per render. Stdout read is capped at 1 KiB. No additional file reads from `.rl/` remain in `src/main.zig`. The git-root discovery and HEAD probe (already present for the path/branch segment) are reused, not duplicated.
-- **REQ-SL-083** (tests): The new rl segment is intentionally left uncovered by design. A fake-PATH integration test would require test-only subprocess environment plumbing larger than the helper itself; the project relies on `zig build`, `zig build test`, and live smoke against the real `rl statusline` contract instead.
-
-### Typed mission segment
-
-- **REQ-SL-096** (canonical delegation): A git root containing `LOOP.md` adds the exact compact projection from `missionctl statusline --root <git_root>`, prefixed by one space. The renderer does not parse loop YAML, infer gate or unit state, or invent a score; `missionctl` remains the sole reducer, including its visible `loop invalid` and `loop legacy` degradations. A `.mission/mission.yaml` is optional and never gates the segment.
-- **REQ-SL-097** (loop-root gate and fail-open): Repositories without a root `LOOP.md` add no loop process and no segment. Missing `missionctl`, spawn failure, non-zero exit, stderr output, empty/whitespace output, output overflow, or an embedded newline all hide the segment without affecting the rest of the statusline.
-- **REQ-SL-098** (bounded single-line projection): Mission stdout is retained up to 512 bytes while both child pipes are fully drained. Leading/trailing ASCII whitespace, including the CLI's terminal newline, is removed; a second line is rejected to preserve I-1. Unit tests cover the accepted projection and every output rejection class. A cross-repository smoke compares the rendered substring to `missionctl statusline` for the same committed artifacts.
+Verification: `python3 test/renderer-smoke.py zig-out/bin/statusline` exercises
+REQ-SL-100's non-invocation contract through recording executables, plus retained
+input, Git, model/context, goal, permission, and activity behavior. The CI fixture
+step runs this harness; the Zig unit suite remains the parser/formatter oracle.
 
 ### Other segments (captured for traceability)
 
@@ -207,40 +140,12 @@ Historical context only. The statusline no longer parses this schema directly; `
 
 ## Acceptance criteria
 
-rl 1.0 alignment (first cut — 2026-04-12):
+Provider independence (REQ-SL-100):
 
-- [x] `SPEC.md` exists colocated at the repo root.
-- [x] `CodexReviewState` struct, parse functions, and tests removed.
-- [x] `RalphState` gained `strategy`, `review_verdict`, `review_in_flight_job_id`, `best_metric_value`, `version`.
-- [x] `parseRalphStateFromContent` threads the allocator.
-- [x] `glyphs` namespace.
-- [x] Strategy-aware `format` (REQ-SL-032, REQ-SL-034).
-- [x] 50/50 tests passing.
-
-rl 1.1 strategy-aware renderer (this change set — 2026-04-13):
-
-- [ ] `RalphState` gains `completion_claimed`, `blocked_claimed`, `metric_direction`, `iteration_start_ms`, `review_verdict_sha` fields.
-- [ ] `glyphs` namespace gains `completion`, `blocked`, `arrow_up`, `arrow_down`.
-- [ ] `readJobStatus(allocator, git_root, job_id)` reads `.rl/jobs/{id}.json` and returns the job status string (REQ-SL-066).
-- [ ] `getGitHead(allocator, dir)` runs `git rev-parse HEAD` once per render (REQ-SL-067).
-- [ ] `RalphState.format` dispatches on strategy per REQ-SL-061; ralph/review/research layouts differ as specified.
-- [ ] Terminal-state prefix emitted per REQ-SL-062 (`🚧` blocked, `🏁` completion).
-- [ ] Verdict state resolution mirrors rl hook: orphan-aware in-flight + HEAD-sha staleness check (REQ-SL-063).
-- [ ] Research metric renders with direction arrow per REQ-SL-064.
-- [ ] Loop age renders from `iteration_start_ms` with color grading per REQ-SL-065.
-- [ ] Per-strategy fixture tests cover every `stateUpdates` branch listed in REQ-SL-068.
-- [ ] `zig build test` passes with at least 60 tests total.
-- [ ] Live smoke passes against current `~/0xbigboss/rl` loop and `…/famo-classifier-alignment` loop — rendered segment matches what would be expected given each loop's live `state.json` + HEAD.
-- [ ] All existing non-rl tests remain green (no regression to path/git/model/gauge/cost/idle segments).
-- [x] Impl-worker visibility (REQ-SL-070): `hasRunningImplJob` scans `.rl/jobs/` for `impl-*.json` with status queued/running; renders `🔨` glyph independently of state.json. Tests cover: missing dir, queued/running/completed/failed/cancelled, review-kind job filter, non-json filter, prefix filter.
-
-rl 1.10+ delegation (this change set — 2026-04-20):
-
-- [x] `src/main.zig` loses RalphState, Strategy, MetricDirection, VerdictState, JobStatus, VerdictRaw + their parse/format helpers.
-- [x] `renderRlStatusline` shells out to `rl statusline` with PATH probe and graceful fail-open.
-- [x] SPEC REQ-SL-020..024, REQ-SL-030..039, REQ-SL-060..071 marked SUPERSEDED by REQ-SL-080.
-- [x] New REQ-SL-080..083 describe the delegated contract.
-- [x] `zig build test` passes; line count in `src/main.zig` drops by >= 1000 lines.
+- [x] Neither removed provider is invoked with recording executables on PATH and loop artifacts in a real Git workspace, including a nested cwd.
+- [x] Debug build, retained unit tests, and ReleaseFast build pass.
+- [x] Built-renderer smoke preserves documented producer fixtures, native goals, permissions, context, Git changes, and activity; absent and malformed inputs remain graceful.
+- [x] Fresh bounded contract review and task-based renderer exercise find no blocking preservation or removal defect.
 
 Harness-agnostic cutover (this change set — 2026-06-28):
 
@@ -340,14 +245,12 @@ Kimi Code producer (this change set — 2026-08-13):
 
 - **LOW — local state only.** No schema migration, no auth, no infra. Blast radius is the statusline renderer and its neutral per-session state directory.
 - **LOW — reversible.** Dead code removal is recoverable via git.
-- No high-risk tags apply.
+- **HIGH — approved public contract removal.** REQ-SL-100 retires the rl and missionctl segments. A bounded fresh specialist checks completeness and unrelated-contract preservation after objective verification.
 
 ## Open items
 
-- The `blocked_claimed` / `completion_claimed` flags from rl 1.0 are not surfaced. If `/rl:done` leaves `active == true` while setting these, the statusline will continue rendering the iteration segment. Revisit if the rl contract actually does this; otherwise treat as a non-goal (the Stop hook clears `active` on done).
-- Iteration-runtime indicator (`+Nm` derived from `iteration_start_ms`) is deferred (IMP-7) until concrete "stuck iteration" pain is observed.
 - ~~Whether the REQ-SL-091 reserve applies to Codex is unverified.~~ **Settled 2026-07-31 from the Codex fork's source** (`rust-v0.144.4-fork.20260715.g36d685baf`): it does not. Codex owns a `BASELINE_TOKENS` model and ships an authoritative `total_tokens`; see REQ-SL-092. `test/codex.json` was rebuilt from `token_usage_payload` rather than guessed, and is now internally consistent.
 
 ## Decisions
 
-- 2026-08-29 — The smoke script prepends the MISSIONCTL_BIN directory to PATH for the statusline run, because the renderer resolves missionctl from PATH and a mismatched binary produced a false red. **provisional (driver)**
+- **Ratified 2026-09-09:** The operator approves outright removal of the rl and missionctl renderer integrations and their contracts, without toggles, stubs, or overlays. The rollout driver installs the renderer change before installing provider binaries that remove their statusline commands; this branch prepares local code and evidence only.
