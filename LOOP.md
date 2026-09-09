@@ -3,16 +3,16 @@ loop: 1
 id: remove-loop-integrations-20260909
 objective: Remove rl and missionctl renderer integrations while preserving unrelated output and Sox integration; prepare local commits and evidence for the rollout driver.
 status: active
-phase: DEV
-iteration: 3
+phase: E2E
+iteration: 4
 iteration_budget: 6
-updated_at: 2026-09-09T16:28:04Z
+updated_at: 2026-09-09T16:28:59Z
 targets:
   spec: [REQ-SL-100, REQ-SL-001, REQ-SL-015, REQ-SL-051, REQ-SL-057]
 gates:
   - { id: build, run: zig build --summary all, green: Debug renderer builds, state: green }
   - { id: unit, run: zig build test --summary all, green: All retained unit tests pass, state: green }
-  - { id: optimized, run: zig build -Doptimize=ReleaseFast --summary all, green: Optimized renderer builds, state: unknown }
+  - { id: optimized, run: zig build -Doptimize=ReleaseFast --summary all, green: Optimized renderer builds, state: green }
   - { id: smoke, run: python3 test/renderer-smoke.py zig-out/bin/statusline, green: No provider calls and all preserved field and failure scenarios pass, state: green }
   - { id: contract-review, run: Fresh bounded contract specialist via native subagent, green: No unresolved P1 or P2 contract removal or preservation findings, state: unknown }
   - { id: bugbash, run: Fresh bounded renderer task exercise via native subagent, green: All charter tasks run with no P1 or P2 behavior findings, state: unknown }
@@ -20,8 +20,8 @@ units:
   - { id: U1, title: Inspect contracts and declare verifier and six-iteration plan, targets: [REQ-SL-080, REQ-SL-096], state: done }
   - { id: U2, title: Build baseline and observe provider non-invocation regression red, targets: [REQ-SL-080, REQ-SL-096], state: done }
   - { id: U3, title: Remove integrations and retire approved contracts with targeted green, targets: [REQ-SL-080, REQ-SL-096], state: done }
-  - { id: U4, title: Verify fixture preservation and required builds on candidate, targets: [REQ-SL-001, REQ-SL-015, REQ-SL-051, REQ-SL-057], state: current }
-  - { id: U5, title: Execute fresh bounded contract review and resolve findings, state: pending }
+  - { id: U4, title: Verify fixture preservation and required builds on candidate, targets: [REQ-SL-001, REQ-SL-015, REQ-SL-051, REQ-SL-057], state: done }
+  - { id: U5, title: Execute fresh bounded contract review and resolve findings, state: current }
   - { id: U6, title: Execute fresh renderer bug bash and close local campaign with evidence, state: pending }
 decisions:
   - { date: 2026-09-09, call: Operator approves outright removal of both provider integrations and contracts without toggles or replacements; native author session owns only this worktree and local commits., status: ratified }
@@ -32,6 +32,8 @@ boundary: [publish, push, PR, merge, tag, install, release, global-config, provi
 # Loop: remove provider statusline integrations
 
 ## State
+
+- Iteration 4: `release-build.log` passes ReleaseFast; `green-release-smoke.log` passes all documented fixtures and failure/lifecycle cases, zero trapped provider calls, and byte-for-byte baseline comparison. `versions.log` confirms unchanged 0.3.14 manifest alignment. `git diff BASE --numstat -- src/main.zig pi plugins test/*.json` shows only 0 additions / 335 deletions in the renderer; pi, plugin/hooks and fixture bytes are unchanged. Candidate identity is recorded in `candidate-identity.json`. Independent gates remain pending.
 
 - Iteration 3: removed 335 Zig lines (two delegates, exclusive root/HEAD and pipe/output helpers, loop probe, three dedicated tests), obsolete smoke, and active/historical integration claims. Existing permission REQ-SL-060 had collided with a historical loop ID; only its loop use is retired. Debug build and 88/88 retained tests pass; `green-debug-smoke.log` records zero provider calls and byte-identical outputs against the base with providers absent. The new smoke is wired into the existing CI fixture step.
 
