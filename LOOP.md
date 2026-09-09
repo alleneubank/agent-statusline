@@ -2,11 +2,11 @@
 loop: 1
 id: remove-loop-integrations-20260909
 objective: Remove rl and missionctl renderer integrations while preserving unrelated output and Sox integration; prepare local commits and evidence for the rollout driver.
-status: active
-phase: E2E
-iteration: 5
+status: done
+phase: BOUNDARY
+iteration: 6
 iteration_budget: 6
-updated_at: 2026-09-09T16:32:49Z
+updated_at: 2026-09-09T16:44:08Z
 targets:
   spec: [REQ-SL-100, REQ-SL-001, REQ-SL-015, REQ-SL-051, REQ-SL-057]
 gates:
@@ -15,14 +15,14 @@ gates:
   - { id: optimized, run: zig build -Doptimize=ReleaseFast --summary all, green: Optimized renderer builds, state: green }
   - { id: smoke, run: python3 test/renderer-smoke.py zig-out/bin/statusline, green: No provider calls and all preserved field and failure scenarios pass, state: green }
   - { id: contract-review, run: Fresh bounded contract specialist via native subagent, green: No unresolved P1 or P2 contract removal or preservation findings, state: green }
-  - { id: bugbash, run: Fresh bounded renderer task exercise via native subagent, green: All charter tasks run with no P1 or P2 behavior findings, state: unknown }
+  - { id: bugbash, run: Fresh bounded renderer task exercise via native subagent, green: All charter tasks run with no P1 or P2 behavior findings, state: green }
 units:
   - { id: U1, title: Inspect contracts and declare verifier and six-iteration plan, targets: [REQ-SL-080, REQ-SL-096], state: done }
   - { id: U2, title: Build baseline and observe provider non-invocation regression red, targets: [REQ-SL-080, REQ-SL-096], state: done }
   - { id: U3, title: Remove integrations and retire approved contracts with targeted green, targets: [REQ-SL-080, REQ-SL-096], state: done }
   - { id: U4, title: Verify fixture preservation and required builds on candidate, targets: [REQ-SL-001, REQ-SL-015, REQ-SL-051, REQ-SL-057], state: done }
   - { id: U5, title: Execute fresh bounded contract review and resolve findings, state: done }
-  - { id: U6, title: Execute fresh renderer bug bash and close local campaign with evidence, state: current }
+  - { id: U6, title: Execute fresh renderer bug bash and close local campaign with evidence, state: done }
 decisions:
   - { date: 2026-09-09, call: Operator approves outright removal of both provider integrations and contracts without toggles or replacements; native author session owns only this worktree and local commits., status: ratified }
 blockers: []
@@ -32,6 +32,9 @@ boundary: [publish, push, PR, merge, tag, install, release, global-config, provi
 # Loop: remove provider statusline integrations
 
 ## State
+
+- Iteration 6: fresh `/root/renderer_bugbash` terminal green, 6/6 tasks, 39 renders and 8 hook calls, no P1/P2 findings. `bugbash/bugbash.md` links exact commands, outputs, recorder controls, lifecycle snapshots and cleanup. All reviewed file and binary hashes match; only this terminal metadata/acceptance checkbox changes afterward. Source remains the deletion-only implementation. Private fixtures are removed. All six gates are green; local delivery is ready for missionctl closure and final identity binding.
+- Two nonblocking, preserved P3 observations remain outside the removal scope: first unstaged Git change can display +1 because leading porcelain whitespace is trimmed, and REQ-SL-092 three-bucket wording is ambiguous when output_tokens is supplied. Candidate/base controls are byte-identical (`bugbash/commands/reproduction-git-{candidate,base}.json` and `reproduction-context-{candidate,base}.json`). No P1/P2 preservation failure or missing gate is deferred.
 
 - Iteration 5: fresh native specialist `/root/contract_specialist` reports green, no P1/P2 findings, one initial pass; `contract-review.md` records reachability, complete contract retirement, ID integrity, preserved code/fixtures/Sox, and verifier fidelity. All candidate hashes match; builds/smoke were inspected rather than rerun by this participant. The independent task exercise is the remaining gate, chartered in `bugbash-charter.md` for six public CLI tasks on the unchanged ReleaseFast binary.
 

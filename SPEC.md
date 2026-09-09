@@ -145,7 +145,7 @@ Provider independence (REQ-SL-100):
 - [x] Neither removed provider is invoked with recording executables on PATH and loop artifacts in a real Git workspace, including a nested cwd.
 - [x] Debug build, retained unit tests, and ReleaseFast build pass.
 - [x] Built-renderer smoke preserves documented producer fixtures, native goals, permissions, context, Git changes, and activity; absent and malformed inputs remain graceful.
-- [ ] Fresh bounded contract review and task-based renderer exercise find no blocking preservation or removal defect.
+- [x] Fresh bounded contract review and task-based renderer exercise find no blocking preservation or removal defect.
 
 Harness-agnostic cutover (this change set — 2026-06-28):
 
