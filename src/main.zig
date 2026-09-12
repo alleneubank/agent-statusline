@@ -276,9 +276,12 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
         if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
         if (asciiContainsIgnoreCase(name, "gpt-6-astra")) return .gpt6_astra;
-        if (asciiContainsIgnoreCase(name, "gpt-5.6-sol")) return .gpt56_sol;
-        if (asciiContainsIgnoreCase(name, "gpt-5.6-terra")) return .gpt56_terra;
-        if (asciiContainsIgnoreCase(name, "gpt-5.6-luna")) return .gpt56_luna;
+        if (asciiContainsIgnoreCase(name, "gpt-5.6-sol") or
+            asciiContainsIgnoreCase(name, "gpt-5.6 sol")) return .gpt56_sol;
+        if (asciiContainsIgnoreCase(name, "gpt-5.6-terra") or
+            asciiContainsIgnoreCase(name, "gpt-5.6 terra")) return .gpt56_terra;
+        if (asciiContainsIgnoreCase(name, "gpt-5.6-luna") or
+            asciiContainsIgnoreCase(name, "gpt-5.6 luna")) return .gpt56_luna;
         if (asciiContainsIgnoreCase(name, "gpt-5.3-codex-spark")) return .gpt53_codex_spark;
         if (asciiContainsIgnoreCase(name, "gpt-5.4-mini")) return .gpt54_mini;
         if (asciiContainsIgnoreCase(name, "gpt-5.5")) return .gpt55;
@@ -314,6 +317,17 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
+    }
+
+    /// Prefer pi's stable model id when it identifies a known model. Its
+    /// human-readable name uses spaces (for example, "GPT-5.6 Luna"), while
+    /// the id retains the canonical hyphenated form.
+    fn fromIdentity(id: ?[]const u8, display_name: []const u8) ModelType {
+        if (id) |model_id| {
+            const identified = fromName(model_id);
+            if (identified != .unknown) return identified;
+        }
+        return fromName(display_name);
     }
 
     fn isCodex(self: ModelType) bool {
@@ -2276,7 +2290,7 @@ pub fn main(init: std.process.Init) !void {
     // Add model display with gauge
     if (input.model) |model| {
         if (model.display_name) |name| {
-            const model_type = ModelType.fromName(name);
+            const model_type = ModelType.fromIdentity(model.id, name);
 
             // A configured auto-compact window moves the gauge's ceiling, so
             // resolve it the way the client does: the producer's declared
@@ -2399,8 +2413,11 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
     try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("GPT-5.6-Sol"));
     try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("gpt-5.6-sol xhigh"));
+    try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("GPT-5.6 Sol"));
     try std.testing.expectEqual(ModelType.gpt56_terra, ModelType.fromName("gpt-5.6-terra medium"));
+    try std.testing.expectEqual(ModelType.gpt56_terra, ModelType.fromName("GPT-5.6 Terra"));
     try std.testing.expectEqual(ModelType.gpt56_luna, ModelType.fromName("gpt-5.6-luna"));
+    try std.testing.expectEqual(ModelType.gpt56_luna, ModelType.fromName("GPT-5.6 Luna"));
     try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName("GPT-5.5"));
     try std.testing.expectEqual(ModelType.gpt55, ModelType.fromName("gpt-5.5 high"));
     try std.testing.expectEqual(ModelType.gpt54, ModelType.fromName("gpt-5.4"));
@@ -2427,6 +2444,21 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("Qwen3.8"));
     try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("qwen-3.8-coder"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
+}
+
+test "ModelType prefers a known stable id over a formatted display name" {
+    try std.testing.expectEqual(
+        ModelType.gpt56_luna,
+        ModelType.fromIdentity("gpt-5.6-luna", "GPT-5.6 Luna"),
+    );
+    try std.testing.expectEqual(
+        ModelType.gpt56_sol,
+        ModelType.fromIdentity("gpt-5.6-sol", "GPT-5.6 Sol high"),
+    );
+    try std.testing.expectEqual(
+        ModelType.opus,
+        ModelType.fromIdentity(null, "Claude Opus 4.1"),
+    );
 }
 
 test "ModelType emoji representations" {
