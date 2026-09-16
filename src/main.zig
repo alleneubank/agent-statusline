@@ -262,13 +262,29 @@ const ModelType = enum {
     kimi,
     // xAI Grok family (Grok Build / Claude Code / Codex display names and ids).
     grok,
+    // DeepSeek V4 family. Untiered ids (`deepseek-chat`, `deepseek-reasoner`)
+    // keep the brand mark; the Flash tier renders its own glyph so the two
+    // V4 tiers are distinguishable in the rendered line.
     deepseek,
+    deepseek_flash,
+    deepseek_pro,
     // Zhipu/Z.ai GLM family (GLM-4.6 display names, glm-4.5 ids,
     // zai/glm-4.6 producer paths, ChatGLM legacy names).
     glm,
     // Alibaba Qwen family (Qwen 3.8 display names and ids).
     qwen,
     unknown,
+
+    /// Case-insensitive whole-token match. Model ids hyphenate tier tokens
+    /// ("deepseek-v4-pro") while display names space them ("DeepSeek V4
+    /// Pro"), so the alphanumeric run is the boundary that matters.
+    fn hasToken(name: []const u8, token: []const u8) bool {
+        var tokens = std.mem.tokenizeAny(u8, name, " -_./:");
+        while (tokens.next()) |candidate| {
+            if (std.ascii.eqlIgnoreCase(candidate, token)) return true;
+        }
+        return false;
+    }
 
     fn fromName(name: []const u8) ModelType {
         if (asciiContainsIgnoreCase(name, "Opus")) return .opus;
@@ -297,13 +313,16 @@ const ModelType = enum {
         // Grok Build sends display names like "Grok 4.5" / "Grok Build" and
         // ids like "grok-4", "grok-build". Must precede Codex/GPT fallbacks.
         if (asciiContainsIgnoreCase(name, "Grok")) return .grok;
-        // DeepSeek reports ids like "DeepSeek-V4-Flash-0731" (pi) and
-        // "deepseek-chat" / "deepseek-reasoner" (direct API). The brand name
-        // is unambiguous: no other producer embeds it, and the DeepSeek id
-        // never collides with the glyph patterns above. Match the provider
-        // rather than the "Flash" family token, which would also catch Gemini
-        // Flash display names.
-        if (asciiContainsIgnoreCase(name, "deepseek")) return .deepseek;
+        // DeepSeek reports ids like "deepseek-v4-pro" / "deepseek-flash"
+        // (pi) and "DeepSeek-V4-Flash-0731" / "deepseek-chat" /
+        // "deepseek-reasoner" (direct API). The brand token is unambiguous:
+        // no other producer embeds it. Resolve the tier only inside this
+        // branch, so a Gemini "Flash" display name never lands here.
+        if (asciiContainsIgnoreCase(name, "deepseek")) {
+            if (hasToken(name, "flash")) return .deepseek_flash;
+            if (hasToken(name, "pro")) return .deepseek_pro;
+            return .deepseek;
+        }
         // Zhipu/Z.ai GLM reports ids like "glm-4.6", "glm-4.5-air" and
         // producer paths like "zai/glm-4.6"; legacy display names say
         // "ChatGLM". The "glm" token is unambiguous: no other producer
@@ -349,6 +368,8 @@ const ModelType = enum {
             .kimi,
             .grok,
             .deepseek,
+            .deepseek_flash,
+            .deepseek_pro,
             .glm,
             .qwen,
             .unknown,
@@ -382,8 +403,12 @@ const ModelType = enum {
             // Milky Way: cosmic, xAI-aligned, not colliding with 🌙/🌑.
             .grok => "🌌",
             // Spouting whale: DeepSeek's whale brand mark; the name evokes
-            // deep-sea discovery.
-            .deepseek => "🐳",
+            // deep-sea discovery. The Pro tier and untiered legacy ids keep
+            // the brand mark.
+            .deepseek, .deepseek_pro => "🐳",
+            // Dolphin: the Flash tier is the fast, light swimmer; a leaping
+            // silhouette that reads apart from the whale at one cell.
+            .deepseek_flash => "🐬",
             // Crystal ball: Zhipu (智谱) means "wisdom spectrum"; prescient
             // wisdom, distinct from every other glyph in the set.
             .glm => "🔮",
@@ -2432,9 +2457,16 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.grok, ModelType.fromName("Grok Build"));
     try std.testing.expectEqual(ModelType.grok, ModelType.fromName("grok-4"));
     try std.testing.expectEqual(ModelType.grok, ModelType.fromName("grok-build"));
-    try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("DeepSeek-V4-Flash-0731"));
+    try std.testing.expectEqual(ModelType.deepseek_flash, ModelType.fromName("DeepSeek-V4-Flash-0731"));
+    try std.testing.expectEqual(ModelType.deepseek_flash, ModelType.fromName("deepseek-flash"));
+    try std.testing.expectEqual(ModelType.deepseek_flash, ModelType.fromName("DeepSeek V4.1 Flash"));
+    try std.testing.expectEqual(ModelType.deepseek_pro, ModelType.fromName("deepseek-v4-pro"));
+    try std.testing.expectEqual(ModelType.deepseek_pro, ModelType.fromName("DeepSeek V4 Pro"));
     try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("deepseek-chat"));
     try std.testing.expectEqual(ModelType.deepseek, ModelType.fromName("deepseek-reasoner"));
+    // Tier tokens only apply inside the DeepSeek brand branch; a Gemini Flash
+    // name must not inherit the DeepSeek glyph.
+    try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("gemini-2.5-flash"));
     try std.testing.expectEqual(ModelType.glm, ModelType.fromName("glm-4.6"));
     try std.testing.expectEqual(ModelType.glm, ModelType.fromName("glm-4.5"));
     try std.testing.expectEqual(ModelType.glm, ModelType.fromName("glm-4.5-air"));
@@ -2477,6 +2509,9 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("⌘", ModelType.codex.emoji());
     try std.testing.expectEqualStrings("🌑", ModelType.kimi.emoji());
     try std.testing.expectEqualStrings("🌌", ModelType.grok.emoji());
+    try std.testing.expectEqualStrings("🐳", ModelType.deepseek.emoji());
+    try std.testing.expectEqualStrings("🐳", ModelType.deepseek_pro.emoji());
+    try std.testing.expectEqualStrings("🐬", ModelType.deepseek_flash.emoji());
     try std.testing.expectEqualStrings("🐉", ModelType.qwen.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
