@@ -251,6 +251,8 @@ const ModelType = enum {
     haiku,
     fable,
     gpt6_astra,
+    gpt6_sol,
+    gpt6_luna,
     gpt56_sol,
     gpt56_terra,
     gpt56_luna,
@@ -292,6 +294,10 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
         if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
         if (asciiContainsIgnoreCase(name, "gpt-6-astra")) return .gpt6_astra;
+        if (asciiContainsIgnoreCase(name, "gpt-6-sol") or
+            asciiContainsIgnoreCase(name, "gpt-6 sol")) return .gpt6_sol;
+        if (asciiContainsIgnoreCase(name, "gpt-6-luna") or
+            asciiContainsIgnoreCase(name, "gpt-6 luna")) return .gpt6_luna;
         if (asciiContainsIgnoreCase(name, "gpt-5.6-sol") or
             asciiContainsIgnoreCase(name, "gpt-5.6 sol")) return .gpt56_sol;
         if (asciiContainsIgnoreCase(name, "gpt-5.6-terra") or
@@ -352,6 +358,8 @@ const ModelType = enum {
     fn isCodex(self: ModelType) bool {
         return switch (self) {
             .gpt6_astra,
+            .gpt6_sol,
+            .gpt6_luna,
             .gpt56_sol,
             .gpt56_terra,
             .gpt56_luna,
@@ -389,6 +397,8 @@ const ModelType = enum {
             .fable => "🦊",
             // Astra chose a shooting star for its celestial name.
             .gpt6_astra => "🌠",
+            .gpt6_sol => "🌞",
+            .gpt6_luna => "🌕",
             .gpt56_sol => "☀️",
             .gpt56_terra => "🌍",
             .gpt56_luna => "🌙",
@@ -2436,6 +2446,10 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable 5"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable"));
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6-sol"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6 Sol xhigh"));
+    try std.testing.expectEqual(ModelType.gpt6_luna, ModelType.fromName("gpt-6-luna high"));
+    try std.testing.expectEqual(ModelType.gpt6_luna, ModelType.fromName("GPT-6 Luna"));
     try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("GPT-5.6-Sol"));
     try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("gpt-5.6-sol xhigh"));
     try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("GPT-5.6 Sol"));
@@ -2480,6 +2494,14 @@ test "ModelType detects models correctly" {
 
 test "ModelType prefers a known stable id over a formatted display name" {
     try std.testing.expectEqual(
+        ModelType.gpt6_sol,
+        ModelType.fromIdentity("gpt-6-sol", "GPT-5.6 Luna"),
+    );
+    try std.testing.expectEqual(
+        ModelType.gpt6_luna,
+        ModelType.fromIdentity("gpt-6-luna", "GPT-6 Luna"),
+    );
+    try std.testing.expectEqual(
         ModelType.gpt56_luna,
         ModelType.fromIdentity("gpt-5.6-luna", "GPT-5.6 Luna"),
     );
@@ -2498,6 +2520,8 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("📜", ModelType.sonnet.emoji());
     try std.testing.expectEqualStrings("🍃", ModelType.haiku.emoji());
     try std.testing.expectEqualStrings("🦊", ModelType.fable.emoji());
+    try std.testing.expectEqualStrings("🌞", ModelType.gpt6_sol.emoji());
+    try std.testing.expectEqualStrings("🌕", ModelType.gpt6_luna.emoji());
     try std.testing.expectEqualStrings("☀️", ModelType.gpt56_sol.emoji());
     try std.testing.expectEqualStrings("🌍", ModelType.gpt56_terra.emoji());
     try std.testing.expectEqualStrings("🌙", ModelType.gpt56_luna.emoji());
@@ -2514,6 +2538,17 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("🐬", ModelType.deepseek_flash.emoji());
     try std.testing.expectEqualStrings("🐉", ModelType.qwen.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
+}
+
+test "GPT-6 Sol and Luna retain Codex Fast support" {
+    const names = [_][]const u8{ "gpt-6-sol xhigh priority", "gpt-6-luna high priority" };
+    for (names) |name| {
+        const input = StatuslineInput{
+            .model = .{ .display_name = name },
+            .service_tier = "priority",
+        };
+        try std.testing.expect(ServiceTier.fast == resolveServiceTier(input).?);
+    }
 }
 
 test "Astra names render the shooting star and retain Codex Fast support" {
