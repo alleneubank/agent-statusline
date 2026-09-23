@@ -120,37 +120,79 @@ function resolveAttentionBin(): string | undefined {
   return undefined;
 }
 
-/** Run one best-effort `soxd attention` invocation; never throws, never blocks. */
-function runAttention(args: string[]): void {
-  const bin = resolveAttentionBin();
-  if (!bin) return;
-  const child = spawn(bin, ["attention", ...args], {
-    stdio: "ignore",
-    timeout: BIN_TIMEOUT_MS,
-  });
-  child.on("error", () => {
-    // Broker missing or failed to spawn: attention stays absent, like the
-    // hook's best-effort swallows.
-  });
-  const debugLog = process.env.SOX_ATTENTION_DEBUG;
-  if (debugLog) {
-    child.on("close", (code) => {
-      try {
-        appendFileSync(
-          debugLog,
-          `${new Date().toISOString()} [pid ${process.pid}] soxd attention ${args.join(" ")} rc=${code}\n`,
-        );
-      } catch {
-        // Debug file unwritable: stay quiet.
-      }
-    });
+type AttentionState = "working" | "done" | "blocked";
+type AttentionCommand =
+  | { kind: "state"; state: AttentionState; reason?: "Input required" }
+  | { kind: "clear" };
+
+type InputRequestEvent = {
+  type: "opened" | "closed";
+  requestId: string;
+  sessionId: string;
+  toolName: string;
+  summary: string;
+};
+
+const INPUT_EVENT_STRING_MAX = 256;
+const ACTIVE_INPUT_REQUESTS_MAX = 64;
+
+function isInputRequestEvent(data: unknown): data is InputRequestEvent {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
+  const value = data as Record<string, unknown>;
+  if (value.type !== "opened" && value.type !== "closed") return false;
+  for (const field of ["requestId", "sessionId", "toolName", "summary"] as const) {
+    const text = value[field];
+    if (typeof text !== "string" || text.length === 0 || text.length > INPUT_EVENT_STRING_MAX) return false;
   }
+  return true;
 }
 
-const submitAttentionState = (state: "working" | "done" | "blocked", reason?: string): void =>
-  runAttention(reason ? ["--state", state, "--reason", reason.slice(0, 256)] : ["--state", state]);
+function attentionArgs(command: AttentionCommand): string[] {
+  if (command.kind === "clear") return ["--clear"];
+  return command.reason
+    ? ["--state", command.state, "--reason", command.reason]
+    : ["--state", command.state];
+}
 
-const submitAttentionClear = (): void => runAttention(["--clear"]);
+/** Run one best-effort `soxd attention` invocation; never throws, never blocks. */
+function runAttention(command: AttentionCommand, onFinish: () => void): void {
+  const bin = resolveAttentionBin();
+  if (!bin) {
+    onFinish();
+    return;
+  }
+  const args = attentionArgs(command);
+  let child;
+  try {
+    child = spawn(bin, ["attention", ...args], {
+      stdio: "ignore",
+      timeout: BIN_TIMEOUT_MS,
+    });
+  } catch {
+    onFinish();
+    return;
+  }
+  let finished = false;
+  const finish = (): void => {
+    if (finished) return;
+    finished = true;
+    onFinish();
+  };
+  child.on("error", finish);
+  child.on("close", (code) => {
+    finish();
+    const debugLog = process.env.SOX_ATTENTION_DEBUG;
+    if (!debugLog) return;
+    try {
+      appendFileSync(
+        debugLog,
+        `${new Date().toISOString()} [pid ${process.pid}] soxd attention ${args.join(" ")} rc=${code}\n`,
+      );
+    } catch {
+      // Debug file unwritable: stay quiet.
+    }
+  });
+}
 
 /** Synthesize the statusline payload from pi's current context. */
 function buildPayload(ctx: ExtensionContext): unknown {
@@ -194,6 +236,55 @@ export default function (pi: ExtensionAPI): void {
   /** Requests a TUI re-render once a fresh statusline line is cached. */
   let requestRender: (() => void) | undefined = undefined;
   let footerInstalled = false;
+  let currentSessionId: string | undefined;
+  const activeInputRequests = new Set<string>();
+  let attentionInFlight = false;
+  let pendingBlocked = false;
+  let pendingAttention: AttentionCommand | undefined;
+  let attentionIdle: Promise<void> | undefined;
+  let resolveAttentionIdle: (() => void) | undefined;
+
+  const submitAttention = (command: AttentionCommand): void => {
+    if (attentionInFlight) {
+      if (command.kind === "clear") {
+        pendingBlocked = false;
+      } else if (command.state === "blocked") {
+        pendingBlocked = true;
+      }
+      pendingAttention = command;
+      return;
+    }
+
+    attentionInFlight = true;
+    runAttention(command, () => {
+      attentionInFlight = false;
+      let next: AttentionCommand | undefined;
+      if (pendingBlocked) {
+        next = { kind: "state", state: "blocked", reason: "Input required" };
+        pendingBlocked = false;
+        if (pendingAttention?.kind === "state" && pendingAttention.state === "blocked") {
+          pendingAttention = undefined;
+        }
+      } else {
+        next = pendingAttention;
+        pendingAttention = undefined;
+      }
+      if (next) submitAttention(next);
+      else {
+        resolveAttentionIdle?.();
+        attentionIdle = undefined;
+        resolveAttentionIdle = undefined;
+      }
+    });
+  };
+
+  const submitAttentionState = (state: AttentionState): void => {
+    if (activeInputRequests.size > 0) {
+      submitAttention({ kind: "state", state: "blocked", reason: "Input required" });
+      return;
+    }
+    submitAttention({ kind: "state", state });
+  };
 
   /** Record prompt/idle activity into the binary's state dir (💬/💤 timestamps),
    * then render once the write has landed so the first frame of a turn shows
@@ -250,7 +341,22 @@ export default function (pi: ExtensionAPI): void {
     child.stdin?.end(JSON.stringify(buildPayload(ctx)));
   };
 
+  pi.events.on("pi:user-input", (data) => {
+    if (!isInputRequestEvent(data) || data.sessionId !== currentSessionId) return;
+    if (data.type === "opened") {
+      if (activeInputRequests.has(data.requestId) || activeInputRequests.size >= ACTIVE_INPUT_REQUESTS_MAX) return;
+      const wasUnblocked = activeInputRequests.size === 0;
+      activeInputRequests.add(data.requestId);
+      if (wasUnblocked) submitAttentionState("blocked");
+      return;
+    }
+    if (!activeInputRequests.delete(data.requestId)) return;
+    if (activeInputRequests.size === 0) submitAttentionState("working");
+  });
+
   pi.on("session_start", (_event, ctx) => {
+    activeInputRequests.clear();
+    currentSessionId = ctx.sessionManager.getSessionId();
     if (ctx.mode !== "tui") return;
     if (!footerInstalled) {
       footerInstalled = true;
@@ -281,8 +387,19 @@ export default function (pi: ExtensionAPI): void {
   // stale while the command center waits. Mirrors PreToolUse | PostToolUse.
   pi.on("tool_execution_start", () => submitAttentionState("working"));
   pi.on("agent_settled", (_event, ctx) => {
+    activeInputRequests.clear();
+    pendingBlocked = false;
     submitAttentionState("done");
     recordActivityThenRender("Stop", ctx);
   });
-  pi.on("session_shutdown", () => submitAttentionClear());
+  pi.on("session_shutdown", async () => {
+    activeInputRequests.clear();
+    currentSessionId = undefined;
+    submitAttention({ kind: "clear" });
+    // Runtime replacement must wait for this emitter's last clear to finish.
+    if (attentionInFlight) {
+      attentionIdle ??= new Promise<void>((resolve) => { resolveAttentionIdle = resolve; });
+      await attentionIdle;
+    }
+  });
 }
