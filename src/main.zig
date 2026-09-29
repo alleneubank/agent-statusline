@@ -293,6 +293,7 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "Sonnet")) return .sonnet;
         if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
         if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
+        if (asciiContainsIgnoreCase(name, "gpt-6.1")) return .gpt6_sol;
         if (asciiContainsIgnoreCase(name, "gpt-6-astra")) return .gpt6_astra;
         if (asciiContainsIgnoreCase(name, "gpt-6-sol") or
             asciiContainsIgnoreCase(name, "gpt-6 sol")) return .gpt6_sol;
@@ -2446,6 +2447,12 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable 5"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable"));
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6.1"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6.1 high priority"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6.1-sol"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6.1-SOL"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6.1-sol xhigh priority"));
+    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6.1 Sol high"));
     try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6-sol"));
     try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6 Sol xhigh"));
     try std.testing.expectEqual(ModelType.gpt6_luna, ModelType.fromName("gpt-6-luna high"));
@@ -2495,6 +2502,10 @@ test "ModelType detects models correctly" {
 test "ModelType prefers a known stable id over a formatted display name" {
     try std.testing.expectEqual(
         ModelType.gpt6_sol,
+        ModelType.fromIdentity("gpt-6.1", "GPT-6 Luna high"),
+    );
+    try std.testing.expectEqual(
+        ModelType.gpt6_sol,
         ModelType.fromIdentity("gpt-6-sol", "GPT-5.6 Luna"),
     );
     try std.testing.expectEqual(
@@ -2540,8 +2551,14 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 
-test "GPT-6 Sol and Luna retain Codex Fast support" {
-    const names = [_][]const u8{ "gpt-6-sol xhigh priority", "gpt-6-luna high priority" };
+test "Sol and Luna retain Codex Fast support" {
+    const names = [_][]const u8{
+        "gpt-6.1 xhigh priority",
+        "gpt-6.1-sol xhigh priority",
+        "GPT-6.1 Sol high priority",
+        "gpt-6-sol xhigh priority",
+        "gpt-6-luna high priority",
+    };
     for (names) |name| {
         const input = StatuslineInput{
             .model = .{ .display_name = name },
