@@ -57,6 +57,42 @@ Build a release binary and point your Claude Code `statusLine` setting at it (`~
 
 Claude Code pipes the status JSON to the command on stdin and renders its stdout.
 
+### Subagent rows
+
+The main `statusLine` payload carries only the session's model. To show each
+subagent's own model in the agent panel, point Claude Code's
+`subagentStatusLine` setting at the `subagents` subcommand:
+
+```json
+{
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "/absolute/path/to/zig-out/bin/statusline subagents"
+  }
+}
+```
+
+Each refresh tick, Claude Code sends every visible row as one `tasks` payload;
+the renderer answers with one `{"id": ..., "content": ...}` JSON line per row.
+A row reads like the main line's model segment, followed by who the subagent is
+and what it is doing:
+
+```text
+█▏    🍃🔵 Explore · Reading src/main.zig
+⋯ general-purpose · Plan migration
+```
+
+The gauge is the subagent's `tokenCount` against its auto-compact ceiling, the
+glyph is the subagent's resolved model (same table as the main line), and the
+dot is its configured effort. `⋯` holds the glyph slot until Claude Code
+resolves the subagent's model. A task the renderer cannot read keeps Claude
+Code's default row, and an unparseable payload prints nothing.
+
+```bash
+printf '{"tasks":[{"id":"a1","agentType":"Explore","label":"Find config","model":"claude-haiku-4-5"}]}' \
+  | ./zig-out/bin/statusline subagents
+```
+
 Install or enable the bundled plugin in `plugins/agent-statusline` so activity
 hooks can update prompt/idle state. The hook wrapper must be able to find the
 same binary through one of:

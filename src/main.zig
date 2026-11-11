@@ -735,10 +735,11 @@ const default_debug_log_path: []const u8 = "/tmp/statusline-debug.log";
 
 const version_string: []const u8 = @import("build_options").version;
 
-/// How one invocation behaves. `render` and `activity_hook` consume stdin;
-/// `version` and `help` must not, because they are typed at a terminal where
-/// nothing will ever arrive on fd 0 and the read would hang forever.
-const RunMode = enum { render, activity_hook, version, help };
+/// How one invocation behaves. `render`, `activity_hook`, and `subagents`
+/// consume stdin; `version` and `help` must not, because they are typed at a
+/// terminal where nothing will ever arrive on fd 0 and the read would hang
+/// forever.
+const RunMode = enum { render, activity_hook, subagents, version, help };
 
 /// Claim an argument as a mode-selecting flag, or return null to leave it for
 /// the render-mode parser. Kept separate from the argument loop so the claimed
@@ -756,11 +757,17 @@ const help_text: []const u8 =
     \\Usage:
     \\  statusline [--debug]              Render a status line from JSON on stdin.
     \\  statusline activity-hook <event>  Record a prompt/idle activity event.
+    \\  statusline subagents              Render Claude Code subagent panel rows.
     \\  statusline --version, -V          Print the version and exit.
     \\  statusline --help, -h             Print this help and exit.
     \\
     \\Render mode reads one JSON payload on stdin and writes one line to stdout.
     \\It never fails the line: missing data hides a segment rather than erroring.
+    \\
+    \\Subagents mode is the command for Claude Code's subagentStatusLine setting.
+    \\It reads the tasks payload on stdin and writes one {"id","content"} JSON
+    \\line per task it can render; a task it cannot render keeps Claude Code's
+    \\default row, and an unparseable payload writes nothing.
     \\
     \\Context gauge:
     \\  The bar fills against the auto-compact ceiling, not the model's full
@@ -2144,6 +2151,119 @@ fn getGitStatus(allocator: Allocator, io: std.Io, dir: []const u8) !GitStatus {
     return GitStatus.parse(output);
 }
 
+/// The `subagentStatusLine` payload: one object per refresh tick carrying
+/// every visible agent-panel row. Tasks stay untyped here so each one parses
+/// on its own, and a task this renderer cannot read keeps its default row
+/// instead of blanking the whole panel.
+const SubagentStatusInput = struct {
+    tasks: []const json.Value = &.{},
+};
+
+/// One agent-panel row. Claude Code omits optional fields until they have a
+/// value: `model` until the subagent's model resolves, `contextWindowSize`
+/// whenever `model` is absent. `id` is required because a row body can only be
+/// replaced by echoing it.
+const SubagentTask = struct {
+    id: []const u8,
+    name: ?[]const u8 = null,
+    agentType: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    label: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+    /// A tier label (`high`) or a numeric thinking-token budget.
+    effort: ?json.Value = null,
+    contextWindowSize: ?f64 = null,
+    tokenCount: ?f64 = null,
+
+    /// Only a tier label maps onto the effort dial; a numeric budget has no
+    /// tier, so it hides the badge like an unknown label does.
+    fn effortLevel(self: SubagentTask) ?EffortLevel {
+        const effort = self.effort orelse return null;
+        return switch (effort) {
+            .string => |label| EffortLevel.fromLabel(label),
+            else => null,
+        };
+    }
+
+    /// Token count against the same auto-compact ceiling the main line's gauge
+    /// uses, so a subagent bar and the session bar read on one scale.
+    fn contextUsage(self: SubagentTask, ceiling: ContextCeiling) ?ContextUsage {
+        const window_size = self.contextWindowSize orelse return null;
+        const token_count = self.tokenCount orelse return null;
+        return .{ .percentage = percentageOfCeiling(token_count, ceiling.tokens(window_size)) };
+    }
+};
+
+/// The agent panel shows a handful of rows; this bounds the work per tick if
+/// a payload ever carries far more.
+const subagent_rows_max = 64;
+/// Task text kept per row. The panel clips each row at its `columns` width,
+/// so text past a wide terminal is never seen.
+const subagent_name_bytes_max = 48;
+const subagent_label_bytes_max = 160;
+/// Holds the model slot until Claude Code resolves the subagent's model. It
+/// must differ from `ModelType.unknown`'s `?`, which means a resolved model
+/// this renderer does not recognize.
+const subagent_model_pending = colors.gray ++ "⋯" ++ colors.reset;
+
+/// Write task-provided text as one plain run: control bytes become spaces so
+/// a description cannot break the row or inject terminal escapes.
+fn writeRowText(writer: *std.Io.Writer, text: []const u8, bytes_max: usize) !void {
+    for (truncateUtf8(text, bytes_max)) |byte| {
+        try writer.writeByte(if (byte < 0x20 or byte == 0x7f) ' ' else byte);
+    }
+}
+
+/// Row body in the main line's model-segment order: gauge, model glyph,
+/// effort dial, then who the subagent is and what it is doing.
+fn formatSubagentRow(writer: *std.Io.Writer, task: SubagentTask, ceiling: ContextCeiling) !void {
+    if (task.model) |model_id| {
+        if (task.contextUsage(ceiling)) |usage| {
+            try usage.formatGauge(writer, default_gauge_config);
+            try writer.writeAll(" ");
+        }
+        try writer.writeAll(ModelType.fromName(model_id).emoji());
+    } else {
+        try writer.writeAll(subagent_model_pending);
+    }
+    if (task.effortLevel()) |level| try writer.writeAll(level.meter());
+    if (task.name orelse task.agentType) |who| {
+        try writer.writeAll(" ");
+        try writeRowText(writer, who, subagent_name_bytes_max);
+    }
+    if (task.label orelse task.description) |doing| {
+        try writer.print(" {s}· ", .{colors.gray});
+        try writeRowText(writer, doing, subagent_label_bytes_max);
+        try writer.writeAll(colors.reset);
+    }
+}
+
+/// Write one `{"id","content"}` JSON line per renderable task. A payload that
+/// does not parse returns the parse error before anything is written, which
+/// leaves every row on Claude Code's default rendering.
+fn writeSubagentRows(allocator: Allocator, writer: *std.Io.Writer, input_json: []const u8, ceiling: ContextCeiling) !void {
+    const input = try json.parseFromSliceLeaky(SubagentStatusInput, allocator, input_json, .{
+        .ignore_unknown_fields = true,
+    });
+    const tasks = input.tasks[0..@min(input.tasks.len, subagent_rows_max)];
+    for (tasks) |value| {
+        // A task without a string `id`, or with a field of the wrong type,
+        // cannot be addressed or read; skipping it keeps its default row.
+        const task = json.parseFromValueLeaky(SubagentTask, allocator, value, .{
+            .ignore_unknown_fields = true,
+        }) catch continue;
+
+        var row_buffer: [1024]u8 = undefined;
+        var row: std.Io.Writer = .fixed(&row_buffer);
+        // Text caps keep a row far below the buffer; should one still not
+        // fit, the default row is better than a clipped escape sequence.
+        formatSubagentRow(&row, task, ceiling) catch continue;
+
+        try json.Stringify.value(.{ .id = task.id, .content = row.buffered() }, .{}, writer);
+        try writer.writeAll("\n");
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     // Use ArenaAllocator for better performance - free everything at once
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -2168,6 +2288,8 @@ pub fn main(init: std.process.Init) !void {
             debug_mode = true;
         } else if (std.mem.eql(u8, arg, "activity-hook")) {
             run_mode = .activity_hook;
+        } else if (std.mem.eql(u8, arg, "subagents")) {
+            run_mode = .subagents;
         } else if (run_mode == .activity_hook and hook_event_arg == null) {
             hook_event_arg = arg;
         }
@@ -2188,7 +2310,7 @@ pub fn main(init: std.process.Init) !void {
             out.flush() catch {};
             return;
         },
-        .render, .activity_hook => {},
+        .render, .activity_hook, .subagents => {},
     }
     debug_mode = debug_mode or envFlag(init.environ_map.get("STATUSLINE_DEBUG"));
     const env_debug_log_path = debugLogPath(init);
@@ -2218,6 +2340,29 @@ pub fn main(init: std.process.Init) !void {
         var stdout_writer_wrapper = std.Io.File.stdout().writer(io, &stdout_buffer);
         const stdout = &stdout_writer_wrapper.interface;
         stdout.print("{{}}\n", .{}) catch {};
+        stdout.flush() catch {};
+        return;
+    }
+
+    if (run_mode == .subagents) {
+        // Rows are collected first so a failure mid-payload never leaves a
+        // partial JSON line on stdout.
+        var rows: std.Io.Writer.Allocating = .init(allocator);
+        const ceiling: ContextCeiling = .{
+            .output_reserve = resolveOutputReserve(init.environ_map.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")),
+        };
+        writeSubagentRows(allocator, &rows.writer, input_json, ceiling) catch |err| {
+            appendDebug(io, debug_log_path, "Subagent rows error: {any}", .{err});
+            rows.clearRetainingCapacity();
+        };
+        const output = rows.written();
+        appendDebug(io, debug_log_path, "Output: {s}", .{output});
+        writeCaptureFile(io, capture_dir, "output.jsonl", output);
+
+        var stdout_buffer: [4096]u8 = undefined;
+        var stdout_writer_wrapper = std.Io.File.stdout().writer(io, &stdout_buffer);
+        const stdout = &stdout_writer_wrapper.interface;
+        stdout.writeAll(output) catch {};
         stdout.flush() catch {};
         return;
     }
@@ -3662,7 +3807,116 @@ test "CLI flag parsing ignores render-mode arguments" {
     try std.testing.expect(cliFlagMode("--debug") == null);
     try std.testing.expect(cliFlagMode("activity-hook") == null);
     try std.testing.expect(cliFlagMode("Stop") == null);
+    try std.testing.expect(cliFlagMode("subagents") == null);
     try std.testing.expect(cliFlagMode("") == null);
+}
+
+const SubagentRowLine = struct { id: []const u8, content: []const u8 };
+
+/// Run the subagent renderer and parse every emitted line back as JSON, so
+/// each test asserts what Claude Code would read rather than raw bytes.
+fn renderSubagentRowsForTest(arena: Allocator, input_json: []const u8) ![]const SubagentRowLine {
+    var output: std.Io.Writer.Allocating = .init(arena);
+    try writeSubagentRows(arena, &output.writer, input_json, .{});
+    const written = output.written();
+    if (written.len > 0) try std.testing.expectEqual(@as(u8, '\n'), written[written.len - 1]);
+
+    var lines: std.ArrayList(SubagentRowLine) = .empty;
+    var it = std.mem.splitScalar(u8, written, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        try lines.append(arena, try json.parseFromSliceLeaky(SubagentRowLine, arena, line, .{}));
+    }
+    return lines.items;
+}
+
+test "subagent rows show each task's resolved model with the main line's glyphs" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rows = try renderSubagentRowsForTest(arena,
+        \\{"session_id":"s","columns":120,"tasks":[
+        \\ {"id":"a1","type":"local_agent","agentType":"Explore","status":"running",
+        \\  "description":"Find config","label":"Reading build.zig","startTime":1,
+        \\  "model":"claude-haiku-4-5","effort":"high","contextWindowSize":200000,
+        \\  "tokenCount":83500,"tokenSamples":[1,2],"cwd":"/tmp"},
+        \\ {"id":"a2","name":"reviewer","agentType":"code-reviewer","status":"running",
+        \\  "description":"Review diff","label":"Review diff","startTime":2,
+        \\  "model":"claude-opus-5-5","tokenCount":0,"tokenSamples":[],"cwd":"/tmp"}
+        \\]}
+    );
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+
+    try std.testing.expectEqualStrings("a1", rows[0].id);
+    try std.testing.expect(std.mem.indexOf(u8, rows[0].content, "🍃🟡 Explore") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rows[0].content, "Reading build.zig") != null);
+    // 83500 of a 200000 window is half the 167000-token auto-compact ceiling:
+    // two full cells and an empty remainder.
+    try std.testing.expect(std.mem.indexOf(u8, rows[0].content, "██▌  ") != null);
+
+    // A name wins over the agent type, and a row with no window has no gauge.
+    try std.testing.expectEqualStrings("a2", rows[1].id);
+    try std.testing.expect(std.mem.startsWith(u8, rows[1].content, "🎭 reviewer"));
+    try std.testing.expect(std.mem.indexOf(u8, rows[1].content, "code-reviewer") == null);
+}
+
+test "subagent rows hold a pending marker until the model resolves" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rows = try renderSubagentRowsForTest(arena,
+        \\{"tasks":[
+        \\ {"id":"p","agentType":"general-purpose","description":"Plan it","tokenCount":0},
+        \\ {"id":"u","agentType":"general-purpose","description":"Odd model","model":"mystery-1",
+        \\  "effort":4096,"contextWindowSize":100000,"tokenCount":5000}
+        \\]}
+    );
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expect(std.mem.startsWith(u8, rows[0].content, subagent_model_pending ++ " general-purpose"));
+    // An unrecognized resolved model is `?`, not the pending marker; a numeric
+    // effort budget has no tier and shows no dial.
+    try std.testing.expect(std.mem.indexOf(u8, rows[1].content, "? general-purpose") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rows[1].content, "⋯") == null);
+}
+
+test "subagent rows skip tasks they cannot address and degrade on bad payloads" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rows = try renderSubagentRowsForTest(arena,
+        \\{"tasks":[{"description":"no id"},{"id":7},{"id":"bad","model":12},{"id":"ok","model":"claude-sonnet-5"}]}
+    );
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqualStrings("ok", rows[0].id);
+    try std.testing.expectEqualStrings("📜", rows[0].content);
+
+    try std.testing.expectEqual(@as(usize, 0), (try renderSubagentRowsForTest(arena, "{\"tasks\":[]}")).len);
+    try std.testing.expectEqual(@as(usize, 0), (try renderSubagentRowsForTest(arena, "{}")).len);
+
+    var sink: std.Io.Writer.Allocating = .init(arena);
+    for ([_][]const u8{ "{\"tasks\":[", "{\"tasks\":{}}", "not json", "" }) |malformed| {
+        if (writeSubagentRows(arena, &sink.writer, malformed, .{})) |_| {
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+    try std.testing.expectEqual(@as(usize, 0), sink.written().len);
+}
+
+test "subagent row text cannot break the row or inject escapes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rows = try renderSubagentRowsForTest(arena,
+        \\{"tasks":[{"id":"x","model":"claude-fable-5","agentType":"a\nb","label":"line one\nline two \u001b[31mred"}]}
+    );
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expect(std.mem.indexOf(u8, rows[0].content, "a b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rows[0].content, "line one line two  [31mred") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, rows[0].content, '\n') == null);
 }
 
 test "ServiceTier recognizes Codex Fast aliases as exact tokens" {

@@ -56,11 +56,12 @@ stdin (JSON StatuslineInput)
 - `ServiceTier` — `fast`. Resolved from a recognized Codex model's structured `service_tier` when present, with an exact, case-insensitive `fast` or `priority` token in `model.display_name` as the legacy fallback. Drives the `🚀` badge.
 - `CodexGoal` — optional producer-provided goal snapshot containing `objective`, `status`, `token_budget`, `tokens_used`, and `time_used_seconds`. Only active goals render.
 - `PermissionsInput` — optional Codex permission snapshot containing explicit `mode` / `label`, `approval_policy`, approval reviewer, active profile identity, filesystem/network labels, enforcement, `yolo`, and an optional `next_turn` snapshot. The renderer also accepts top-level Codex `approval_policy` / `sandbox_policy` fields and a best-effort `permission_mode` compatibility fallback for Claude-like producers.
+- `SubagentTask` — one row of Claude Code's `subagentStatusLine` payload: required `id`, optional `name`, `agentType`, `description`, `label`, `model` (resolved model id, absent until resolved), `effort` (tier label or numeric budget), `contextWindowSize`, `tokenCount`. Each task parses on its own from `SubagentStatusInput.tasks`, so one unreadable task cannot blank the others.
 - `GitStatus` — `{ added, modified, deleted, untracked }`. Parsed from `git status --porcelain`.
 
 ## Invariants
 
-- **I-1 Single-line output.** Exactly one newline, at the end. No mid-line newlines.
+- **I-1 Single-line output.** Exactly one newline, at the end. No mid-line newlines. `subagents` mode (REQ-SL-004B) instead writes one JSON line per row, each ending in a newline, and no row body contains a newline.
 - **I-2 Crash-free.** Any error in any segment must be swallowed into "skip that segment" or, at worst, into the `~\n` fallback. A return code of 0 is always produced (subject to OS limits).
 - **I-3 Sub-process budget.** All `git` subprocess calls run against the workspace `current_dir`. No network. Statusline producers are expected to hide or kill slow renders.
 - **I-4 State writes are scoped.** Render mode never writes to producer files or the repo. Hook mode writes only small per-session activity files under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`. Debug/capture writes remain opt-in.
@@ -76,6 +77,7 @@ stdin (JSON StatuslineInput)
 - **REQ-SL-002**: If stdin JSON fails to parse, emit `~\n` (cyan) to stdout and exit 0. Log the parse error to `/tmp/statusline-debug.log` when `--debug` is set.
 - **REQ-SL-003**: `--debug` command-line flag or `STATUSLINE_DEBUG=1` enables writing the raw input, rendered output, and any diagnostics to `/tmp/statusline-debug.log` (append-only). `STATUSLINE_DEBUG_LOG=/absolute/path.log` overrides the debug log destination.
 - **REQ-SL-004A**: `activity-hook [event]` is a hook subcommand. It reads one hook JSON document from stdin, updates neutral activity state when possible, prints `{}` plus one newline, and exits 0. Unknown hook fields are ignored.
+- **REQ-SL-004B**: `subagents` is the command for Claude Code's `subagentStatusLine` setting (Claude Code docs, "Subagent status lines": https://code.claude.com/docs/en/statusline.md). It reads one JSON object on stdin whose `tasks` array has one entry per agent-panel row, and writes one `{"id": "<task id>", "content": "<row body>"}` JSON line per task it renders. The row body follows the main line's model-segment order: context gauge (`tokenCount` against the REQ-SL-091 ceiling of `contextWindowSize`, shown only when both are present), the model glyph from `ModelType.fromName(model)` (REQ-SL-051; an unrecognized id is `?`), the effort dial (REQ-SL-090; tier labels only, a numeric budget hides it), then `name` (else `agentType`) and a gray `· label` (else `description`). Until `model` resolves the glyph slot shows a gray `⋯`, distinct from `?`. Task text is capped (48 bytes for the name, 160 for the label) and control bytes become spaces, so a row cannot break or inject terminal escapes. Rows are capped at 64 per tick. A task without a string `id` or with a mistyped known field is skipped, which keeps Claude Code's default row for it; a payload that does not parse writes nothing (every row keeps its default) and exits 0. Unknown fields, including the base hook fields and `columns`, are ignored. The ceiling resolves without a settings read (no configured window, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` honored), because the command runs every refresh tick. With `STATUSLINE_CAPTURE_DIR` set, outputs are captured as `statusline-*.output.jsonl`.
 - **REQ-SL-004**: `STATUSLINE_CAPTURE_DIR=/absolute/dir` enables live replay artifacts without changing visible output. For each render, the statusline writes `statusline-*.input.json` and `statusline-*.output.ansi` into the directory when possible. The directory must already exist; failures are swallowed per I-2.
 
 ### Workspace segment
@@ -239,6 +241,13 @@ DeepSeek Flash/Pro glyph split (this change set — 2026-09-16):
 - [x] Flash renders 🐬 (the fast, light swimmer; a leaping silhouette that reads apart from the whale at one cell); Pro renders 🐳. Both pi ids (`deepseek-flash`, `deepseek-v4-pro`) and the `DeepSeek V4.1 Flash` / `DeepSeek V4 Pro` display names resolve to their tier.
 - [x] Detection tests and emoji test observed red against the pre-change tree — `error: enum 'main.ModelType' has no member named 'deepseek_pro'` (`zig build test` exit 1) — then `zig build test` green. The `gemini-2.5-flash` case asserts the negative space: a non-DeepSeek Flash name stays `unknown`.
 - [x] Fixture smoke adds `test/deepseek-pro.json` (🐳) and flips `test/pi.json` (`DeepSeek-V4-Flash-0731`) to 🐬; both pass in `test/renderer-smoke.py`.
+
+Subagent panel rows (this change set — 2026-11-11):
+
+- [x] `subagents` subcommand renders `subagentStatusLine` rows (REQ-SL-004B), reusing `ModelType`, `EffortLevel`, `ContextUsage.formatGauge`, and `ContextCeiling`; no second model table.
+- [x] Unit tests cover resolved models with gauge and effort, the pending marker, an unknown model id, numeric effort, unaddressable and mistyped tasks, empty and absent `tasks`, malformed payloads writing nothing, and control-byte sanitizing; `zig build test` green at 94/94.
+- [x] Built-binary smoke: five-task payload yields five valid JSON lines; empty `tasks`, truncated JSON, non-JSON, empty stdin, and a non-array `tasks` yield no output and exit 0.
+- [x] Live in Claude Code 2.1.322 with `--settings '{"subagentStatusLine":…}'`: a haiku session's sonnet and haiku subagents rendered `📜` and `🍃` rows in the agent panel; captured payloads matched the documented task fields. The pending (`model` absent) state was not observed live; the model had resolved by the first tick.
 
 Kimi Code producer (this change set — 2026-08-13):
 
