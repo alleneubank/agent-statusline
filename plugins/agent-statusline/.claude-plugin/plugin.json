@@ -16,5 +16,6 @@
     "claude",
     "hooks",
     "activity"
-  ]
+  ],
+  "hooks": "./hooks/activity-hooks.json"
 }

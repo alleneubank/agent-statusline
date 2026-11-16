@@ -60,20 +60,16 @@ Claude Code pipes the status JSON to the command on stdin and renders its stdout
 ### Subagent rows
 
 The main `statusLine` payload carries only the session's model. To show each
-subagent's own model in the agent panel, point Claude Code's
-`subagentStatusLine` setting at the `subagents` subcommand:
+subagent's own model in the agent panel, enable the bundled plugin in Claude
+Code: its `hooks/agent-row.ts` mod draws each agent-panel row with the
+`subagents` subcommand, finding the binary the same way the activity hooks do
+(below). No setting is needed.
 
-```json
-{
-  "subagentStatusLine": {
-    "type": "command",
-    "command": "/absolute/path/to/zig-out/bin/statusline subagents"
-  }
-}
-```
+Claude Code deprecated the `subagentStatusLine` setting in favor of mods; remove
+it once the plugin is enabled, or both draw the row and the mod wins.
 
-Each refresh tick, Claude Code sends every visible row as one `tasks` payload;
-the renderer answers with one `{"id": ..., "content": ...}` JSON line per row.
+The mod sends one row at a time as a one-task `tasks` payload (the older setting
+sent every visible row at once); the renderer answers with one `{"id": ..., "content": ...}` JSON line per row.
 A row reads like the main line's model segment, followed by who the subagent is
 and what it is doing:
 

@@ -33,7 +33,7 @@ zig build -Doptimize=ReleaseFast
 - Reads statusline JSON from stdin.
 - Ignores unknown JSON fields (`ignore_unknown_fields = true`).
 - On parse failure, prints minimal fallback (`~`) instead of crashing.
-- `statusline subagents` serves Claude Code's `subagentStatusLine`: one `{"id","content"}` JSON line per task; on parse failure it prints nothing, which keeps Claude Code's default rows.
+- `statusline subagents` renders Claude Code agent-panel rows for the plugin's `hooks/agent-row.ts` mod (and the deprecated `subagentStatusLine` setting): one `{"id","content"}` JSON line per task; on parse failure it prints nothing, which keeps Claude Code's default rows.
 - Optional debug mode appends diagnostics to `/tmp/statusline-debug.log`.
 
 ## Data Sources

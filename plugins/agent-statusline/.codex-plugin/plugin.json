@@ -31,5 +31,6 @@
       "Verify the agent-statusline activity hooks",
       "Debug why the statusline activity marker is stale"
     ]
-  }
+  },
+  "hooks": "./hooks/activity-hooks.json"
 }
