@@ -95,6 +95,7 @@ def exercise(binary: Path, baseline: Path | None, root: Path) -> None:
         "codex-goal.json": ("🌍", "🔵", "🎯12.5k/50k"),
         "opus.json": ("🎭", "🟡"),
         "sonnet.json": ("📜",),
+        "mythos.json": ("🔱", "🟡"),
         "pi.json": ("🐬", "(auto)"),
         "deepseek-pro.json": ("🐳", "(auto)"),
         "kimi.json": ("🌑", "25.0%", "🛡auto"),

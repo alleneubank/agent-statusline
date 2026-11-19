@@ -1,0 +1,24 @@
+{
+  "hook_event_name": "Status",
+  "session_id": "test123",
+  "transcript_path": "/tmp/test.json",
+  "cwd": "/Users/allen/test",
+  "model": {
+    "id": "claude-mythos-5-2",
+    "display_name": "Mythos 5.2"
+  },
+  "workspace": {
+    "current_dir": "/Users/allen/test",
+    "project_dir": "/Users/allen/test"
+  },
+  "version": "1.0.0",
+  "output_style": {
+    "name": "default"
+  },
+  "effort": {
+    "level": "high"
+  },
+  "thinking": {
+    "enabled": true
+  }
+}

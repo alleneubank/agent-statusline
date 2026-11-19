@@ -250,6 +250,7 @@ const ModelType = enum {
     sonnet,
     haiku,
     fable,
+    mythos,
     gpt6_astra,
     gpt6_sol,
     gpt6_luna,
@@ -293,6 +294,7 @@ const ModelType = enum {
         if (asciiContainsIgnoreCase(name, "Sonnet")) return .sonnet;
         if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
         if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
+        if (asciiContainsIgnoreCase(name, "Mythos")) return .mythos;
         if (asciiContainsIgnoreCase(name, "gpt-6.1")) return .gpt6_sol;
         if (asciiContainsIgnoreCase(name, "gpt-6-astra")) return .gpt6_astra;
         if (asciiContainsIgnoreCase(name, "gpt-6-sol") or
@@ -374,6 +376,7 @@ const ModelType = enum {
             .sonnet,
             .haiku,
             .fable,
+            .mythos,
             .kimi,
             .grok,
             .deepseek,
@@ -389,6 +392,7 @@ const ModelType = enum {
     /// Emoji representation based on literal meaning
     /// Opus = grand musical work (theater), Sonnet = poem (scroll), Haiku = nature poem (leaf),
     /// Fable = animal moral tale (fox, Aesop's storyteller),
+    /// Mythos = the body of myth (Poseidon's trident),
     /// Grok = cosmic truth-seeking (milky way; xAI space brand, distinct from luna/kimi moons)
     fn emoji(self: ModelType) []const u8 {
         return switch (self) {
@@ -396,6 +400,7 @@ const ModelType = enum {
             .sonnet => "📜",
             .haiku => "🍃",
             .fable => "🦊",
+            .mythos => "🔱",
             // Astra chose a shooting star for its celestial name.
             .gpt6_astra => "🌠",
             .gpt6_sol => "🌞",
@@ -2591,6 +2596,8 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.haiku, ModelType.fromName("Haiku"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable 5"));
     try std.testing.expectEqual(ModelType.fable, ModelType.fromName("Fable"));
+    try std.testing.expectEqual(ModelType.mythos, ModelType.fromName("Mythos 5.2"));
+    try std.testing.expectEqual(ModelType.mythos, ModelType.fromName("claude-mythos-5-2"));
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
     try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6.1"));
     try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6.1 high priority"));
@@ -2676,6 +2683,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("📜", ModelType.sonnet.emoji());
     try std.testing.expectEqualStrings("🍃", ModelType.haiku.emoji());
     try std.testing.expectEqualStrings("🦊", ModelType.fable.emoji());
+    try std.testing.expectEqualStrings("🔱", ModelType.mythos.emoji());
     try std.testing.expectEqualStrings("🌞", ModelType.gpt6_sol.emoji());
     try std.testing.expectEqualStrings("🌕", ModelType.gpt6_luna.emoji());
     try std.testing.expectEqualStrings("☀️", ModelType.gpt56_sol.emoji());
