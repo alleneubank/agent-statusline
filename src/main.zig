@@ -251,8 +251,8 @@ const ModelType = enum {
     haiku,
     fable,
     mythos,
-    gpt6_astra,
-    gpt6_sol,
+    gpt_astra,
+    gpt_sol,
     gpt6_luna,
     gpt56_sol,
     gpt56_terra,
@@ -289,20 +289,38 @@ const ModelType = enum {
         return false;
     }
 
+    fn fromGptTier(name: []const u8) ?ModelType {
+        const prefix = "gpt-";
+        var words = std.mem.tokenizeAny(u8, name, " \t/:");
+        while (words.next()) |word| {
+            if (!std.ascii.startsWithIgnoreCase(word, prefix)) continue;
+
+            var id = std.mem.splitScalar(u8, word[prefix.len..], '-');
+            const version = id.first();
+            if (version.len == 0 or !std.ascii.isDigit(version[0]) or
+                std.mem.findNone(u8, version, "0123456789.") != null) return null;
+
+            const tier = id.next() orelse words.next() orelse "";
+            if (std.ascii.eqlIgnoreCase(tier, "sol")) {
+                return if (std.mem.eql(u8, version, "5.6")) .gpt56_sol else .gpt_sol;
+            }
+            if (std.ascii.eqlIgnoreCase(tier, "astra")) return .gpt_astra;
+            // Codex also reports GPT-6.1 Sol as the bare version.
+            if (std.mem.eql(u8, version, "6.1")) return .gpt_sol;
+            return null;
+        }
+        return null;
+    }
+
     fn fromName(name: []const u8) ModelType {
         if (asciiContainsIgnoreCase(name, "Opus")) return .opus;
         if (asciiContainsIgnoreCase(name, "Sonnet")) return .sonnet;
         if (asciiContainsIgnoreCase(name, "Haiku")) return .haiku;
         if (asciiContainsIgnoreCase(name, "Fable")) return .fable;
         if (asciiContainsIgnoreCase(name, "Mythos")) return .mythos;
-        if (asciiContainsIgnoreCase(name, "gpt-6.1")) return .gpt6_sol;
-        if (asciiContainsIgnoreCase(name, "gpt-6-astra")) return .gpt6_astra;
-        if (asciiContainsIgnoreCase(name, "gpt-6-sol") or
-            asciiContainsIgnoreCase(name, "gpt-6 sol")) return .gpt6_sol;
+        if (fromGptTier(name)) |model| return model;
         if (asciiContainsIgnoreCase(name, "gpt-6-luna") or
             asciiContainsIgnoreCase(name, "gpt-6 luna")) return .gpt6_luna;
-        if (asciiContainsIgnoreCase(name, "gpt-5.6-sol") or
-            asciiContainsIgnoreCase(name, "gpt-5.6 sol")) return .gpt56_sol;
         if (asciiContainsIgnoreCase(name, "gpt-5.6-terra") or
             asciiContainsIgnoreCase(name, "gpt-5.6 terra")) return .gpt56_terra;
         if (asciiContainsIgnoreCase(name, "gpt-5.6-luna") or
@@ -360,8 +378,8 @@ const ModelType = enum {
 
     fn isCodex(self: ModelType) bool {
         return switch (self) {
-            .gpt6_astra,
-            .gpt6_sol,
+            .gpt_astra,
+            .gpt_sol,
             .gpt6_luna,
             .gpt56_sol,
             .gpt56_terra,
@@ -402,8 +420,8 @@ const ModelType = enum {
             .fable => "🦊",
             .mythos => "🔱",
             // Astra chose a shooting star for its celestial name.
-            .gpt6_astra => "🌠",
-            .gpt6_sol => "🌞",
+            .gpt_astra => "🌠",
+            .gpt_sol => "🌞",
             .gpt6_luna => "🌕",
             .gpt56_sol => "☀️",
             .gpt56_terra => "🌍",
@@ -2599,14 +2617,14 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.mythos, ModelType.fromName("Mythos 5.2"));
     try std.testing.expectEqual(ModelType.mythos, ModelType.fromName("claude-mythos-5-2"));
     try std.testing.expectEqual(ModelType.codex, ModelType.fromName("Codex"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6.1"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6.1 high priority"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6.1-sol"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6.1-SOL"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6.1-sol xhigh priority"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6.1 Sol high"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("gpt-6-sol"));
-    try std.testing.expectEqual(ModelType.gpt6_sol, ModelType.fromName("GPT-6 Sol xhigh"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("gpt-6.1"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("GPT-6.1 high priority"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("gpt-6.1-sol"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("GPT-6.1-SOL"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("gpt-6.1-sol xhigh priority"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("GPT-6.1 Sol high"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("gpt-6-sol"));
+    try std.testing.expectEqual(ModelType.gpt_sol, ModelType.fromName("GPT-6 Sol xhigh"));
     try std.testing.expectEqual(ModelType.gpt6_luna, ModelType.fromName("gpt-6-luna high"));
     try std.testing.expectEqual(ModelType.gpt6_luna, ModelType.fromName("GPT-6 Luna"));
     try std.testing.expectEqual(ModelType.gpt56_sol, ModelType.fromName("GPT-5.6-Sol"));
@@ -2653,11 +2671,11 @@ test "ModelType detects models correctly" {
 
 test "ModelType prefers a known stable id over a formatted display name" {
     try std.testing.expectEqual(
-        ModelType.gpt6_sol,
+        ModelType.gpt_sol,
         ModelType.fromIdentity("gpt-6.1", "GPT-6 Luna high"),
     );
     try std.testing.expectEqual(
-        ModelType.gpt6_sol,
+        ModelType.gpt_sol,
         ModelType.fromIdentity("gpt-6-sol", "GPT-5.6 Luna"),
     );
     try std.testing.expectEqual(
@@ -2684,7 +2702,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("🍃", ModelType.haiku.emoji());
     try std.testing.expectEqualStrings("🦊", ModelType.fable.emoji());
     try std.testing.expectEqualStrings("🔱", ModelType.mythos.emoji());
-    try std.testing.expectEqualStrings("🌞", ModelType.gpt6_sol.emoji());
+    try std.testing.expectEqualStrings("🌞", ModelType.gpt_sol.emoji());
     try std.testing.expectEqualStrings("🌕", ModelType.gpt6_luna.emoji());
     try std.testing.expectEqualStrings("☀️", ModelType.gpt56_sol.emoji());
     try std.testing.expectEqualStrings("🌍", ModelType.gpt56_terra.emoji());
@@ -2721,20 +2739,30 @@ test "Sol and Luna retain Codex Fast support" {
     }
 }
 
-test "Astra names render the shooting star and retain Codex Fast support" {
-    const names = [_][]const u8{
-        "gpt-6-astra",
-        "GPT-6-ASTRA",
-        "gpt-6-astra xhigh priority",
+test "GPT Sol and Astra retain their glyphs across versions" {
+    const cases = [_]struct { name: []const u8, glyph: []const u8 }{
+        .{ .name = "gpt-6.2-sol high", .glyph = "🌞" },
+        .{ .name = "GPT-6.2 Sol high", .glyph = "🌞" },
+        .{ .name = "openai/gpt-7.12-sol", .glyph = "🌞" },
+        .{ .name = "gpt-6-astra", .glyph = "🌠" },
+        .{ .name = "GPT-6-ASTRA", .glyph = "🌠" },
+        .{ .name = "gpt-6-astra xhigh priority", .glyph = "🌠" },
+        .{ .name = "gpt-6.1-astra", .glyph = "🌠" },
+        .{ .name = "gpt-6.2-astra", .glyph = "🌠" },
+        .{ .name = "GPT-7.12 Astra high", .glyph = "🌠" },
     };
-    for (names) |name| {
-        try std.testing.expectEqualStrings("🌠", ModelType.fromName(name).emoji());
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.glyph, ModelType.fromName(case.name).emoji());
         const input = StatuslineInput{
-            .model = .{ .display_name = name },
+            .model = .{ .display_name = case.name },
             .service_tier = "priority",
         };
         try std.testing.expectEqual(ServiceTier.fast, resolveServiceTier(input));
     }
+
+    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("gpt-6.10-solution"));
+    try std.testing.expectEqual(ModelType.codex, ModelType.fromName("gpt-7-astral"));
+    try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Gemini 7 Sol"));
 }
 
 test "EffortLevel fromLabel" {
