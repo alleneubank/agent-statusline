@@ -276,6 +276,8 @@ const ModelType = enum {
     glm,
     // Alibaba Qwen family (Qwen 3.8 display names and ids).
     qwen,
+    // Google Gemini 4 Neon (display names and ids).
+    gemini_neon,
     unknown,
 
     /// Case-insensitive whole-token match. Model ids hyphenate tier tokens
@@ -360,6 +362,10 @@ const ModelType = enum {
         // no other producer embeds it. Must precede the Codex/GPT
         // fallbacks below.
         if (asciiContainsIgnoreCase(name, "qwen")) return .qwen;
+        // Google Gemini 4 Neon reports display names like "Gemini 4 Neon" /
+        // "Gemini 4 Neon (High)" and ids like "gemini-4-neon". Match both
+        // brand and whole tier token so other Gemini names stay unknown.
+        if (asciiContainsIgnoreCase(name, "gemini") and hasToken(name, "neon")) return .gemini_neon;
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
@@ -402,6 +408,7 @@ const ModelType = enum {
             .deepseek_pro,
             .glm,
             .qwen,
+            .gemini_neon,
             .unknown,
             => false,
         };
@@ -451,6 +458,10 @@ const ModelType = enum {
             // reading (❓) collided with the set's `?` unknown glyph and
             // read as an identity bug, so it was retired in 0.3.12.
             .qwen => "🐉",
+            // Gem stone: electric cyan crystal facet for Gemini 4 Neon —
+            // pairs Gemini's gem-bright name with Neon luminescence, distinct
+            // from every other glyph in the set.
+            .gemini_neon => "💎",
             .unknown => "?",
         };
     }
@@ -2666,6 +2677,10 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("qwen3.8"));
     try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("Qwen3.8"));
     try std.testing.expectEqual(ModelType.qwen, ModelType.fromName("qwen-3.8-coder"));
+    try std.testing.expectEqual(ModelType.gemini_neon, ModelType.fromName("Gemini 4 Neon"));
+    try std.testing.expectEqual(ModelType.gemini_neon, ModelType.fromName("Gemini 4 Neon (High)"));
+    try std.testing.expectEqual(ModelType.gemini_neon, ModelType.fromName("gemini-4-neon"));
+    try std.testing.expectEqual(ModelType.gemini_neon, ModelType.fromName("google/gemini-4-neon"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -2719,6 +2734,7 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("🐳", ModelType.deepseek_pro.emoji());
     try std.testing.expectEqualStrings("🐬", ModelType.deepseek_flash.emoji());
     try std.testing.expectEqualStrings("🐉", ModelType.qwen.emoji());
+    try std.testing.expectEqualStrings("💎", ModelType.gemini_neon.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 

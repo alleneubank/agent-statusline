@@ -100,6 +100,7 @@ def exercise(binary: Path, baseline: Path | None, root: Path) -> None:
         "deepseek-pro.json": ("🐳", "(auto)"),
         "kimi.json": ("🌑", "25.0%", "🛡auto"),
         "grok.json": ("🌌",),
+        "gemini-neon.json": ("💎", "14.3%"),
         "minimal.json": (),
     }
     fixtures = sorted((REPO / "test").glob("*.json"))

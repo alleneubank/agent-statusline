@@ -1,0 +1,17 @@
+{
+  "agent_state": "idle",
+  "session_id": "test-gemini-neon",
+  "transcript_path": "/tmp/test.json",
+  "model": {
+    "id": "gemini-4-neon",
+    "display_name": "Gemini 4 Neon (High)"
+  },
+  "workspace": {
+    "current_dir": "/Users/allen/test",
+    "project_dir": "/Users/allen/test"
+  },
+  "context_window": {
+    "context_window_size": 1048576,
+    "used_percentage": 14.3
+  }
+}
