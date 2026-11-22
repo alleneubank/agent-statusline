@@ -1,0 +1,19 @@
+{
+  "name": "agent-statusline",
+  "description": "Hook-backed activity tracking for the agent-statusline renderer across Antigravity CLI, Claude Code, and Codex CLI.",
+  "author": {
+    "name": "Allen Eubank",
+    "url": "https://github.com/0xbigboss/agent-statusline"
+  },
+  "repository": "https://github.com/0xbigboss/agent-statusline",
+  "version": "0.3.24",
+  "license": "Apache-2.0",
+  "keywords": [
+    "statusline",
+    "antigravity",
+    "codex",
+    "claude",
+    "hooks",
+    "activity"
+  ]
+}

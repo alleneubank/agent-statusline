@@ -14,10 +14,10 @@ A fast, single-line status renderer for command-backed agent statusline payloads
   without changing visible output.
 - `STATUSLINE_CAPTURE_DIR=/absolute/dir` writes replay artifacts for every render:
   `statusline-*.input.json` and `statusline-*.output.ansi`.
-- Claude Code, Codex, and Grok Build status payloads are supported. Claude models render with their existing glyphs, and Mythos (`Mythos 5.2`, `claude-mythos-5-2`) renders as 🔱. GPT model names with the Sol or Astra tier use the same glyph across versions. Sol renders as 🌞 and Astra renders as 🌠, the shooting star Astra chose. The bare `gpt-6.1` alias also renders as 🌞. GPT-6 Luna (`gpt-6-luna`) renders as 🌕. GPT-5.6 uses its original glyphs (`gpt-5.6-sol` ☀️, `gpt-5.6-terra` 🌍, `gpt-5.6-luna` 🌙); pi's adapter uses the stable model id when its display label is formatted like `GPT-6.1 Sol`, `GPT-6 Luna`, or `GPT-5.6 Luna`. Previous-generation Codex glyphs remain supported, with `⌘` as the generic GPT/Codex fallback. Kimi models (`kimi-code/*`, `k3[1m]`, `Kimi K2`) render as 🌑. Grok models (`Grok 4.5`, `Grok Build`, `grok-4`) render as 🌌. DeepSeek models render with the whale brand mark: the Flash tier (`deepseek-flash` ids, `DeepSeek-*Flash*` display names) renders as 🐬, while Pro (`deepseek-v4-pro`, `DeepSeek V4 Pro`) and untiered legacy ids (`deepseek-chat`, `deepseek-reasoner`) render as 🐳. GLM models (`glm-4.6`, `glm-4.5-air`, `zai/glm-4.6` producer paths, legacy `ChatGLM` names) render as 🔮. Qwen models (`Qwen3.8` display names, `qwen3.8` ids) render as 🐉. Gemini 4 Neon (`Gemini 4 Neon`, `gemini-4-neon`) renders as 💎. An `(auto)` tag renders after the context gauge when the payload declares auto-compaction enabled (`auto_compact.enabled`, sent by the pi adapter); a percentage-only context payload (`used_percentage` without token buckets) is trusted verbatim.
+- Claude Code, Codex, Antigravity CLI (`agy`), Kimi Code, Pi, and Grok Build status payloads are supported. Claude models render with their existing glyphs, and Mythos (`Mythos 5.2`, `claude-mythos-5-2`) renders as 🔱. GPT model names with the Sol or Astra tier use the same glyph across versions. Sol renders as 🌞 and Astra renders as 🌠, the shooting star Astra chose. The bare `gpt-6.1` alias also renders as 🌞. GPT-6 Luna (`gpt-6-luna`) renders as 🌕. GPT-5.6 uses its original glyphs (`gpt-5.6-sol` ☀️, `gpt-5.6-terra` 🌍, `gpt-5.6-luna` 🌙); pi's adapter uses the stable model id when its display label is formatted like `GPT-6.1 Sol`, `GPT-6 Luna`, or `GPT-5.6 Luna`. Previous-generation Codex glyphs remain supported, with `⌘` as the generic GPT/Codex fallback. Kimi models (`kimi-code/*`, `k3[1m]`, `Kimi K2`) render as 🌑. Grok models (`Grok 4.5`, `Grok Build`, `grok-4`) render as 🌌. DeepSeek models render with the whale brand mark: the Flash tier (`deepseek-flash` ids, `DeepSeek-*Flash*` display names) renders as 🐬, while Pro (`deepseek-v4-pro`, `DeepSeek V4 Pro`) and untiered legacy ids (`deepseek-chat`, `deepseek-reasoner`) render as 🐳. GLM models (`glm-4.6`, `glm-4.5-air`, `zai/glm-4.6` producer paths, legacy `ChatGLM` names) render as 🔮. Qwen models (`Qwen3.8` display names, `qwen3.8` ids) render as 🐉. Gemini 4 Neon (`Gemini 4 Neon`, `gemini-4-neon`) renders as 💡, and Gemini 4 Carbon (`Gemini 4 Carbon`, `gemini-4-carbon`, `gemini-4-carbon-high`) renders as 💎. An `(auto)` tag renders after the context gauge when the payload declares auto-compaction enabled (`auto_compact.enabled`, sent by the pi adapter); Antigravity CLI (`product: "antigravity"`) and percentage-only context payloads (`used_percentage` without token buckets) trust the producer's percentage verbatim.
 - Codex goal payloads render active goal attention as `🎯`; when `tokens_used` and `token_budget` are present, the segment renders compact progress such as `🎯12.5k/50k`.
-- Reasoning effort renders as an emoji dot dial after the model glyph, graded by compute burn: ⚫ minimal, ⚪ low, 🔵 medium, 🟡 high, 🟠 xhigh, 🔴 max, 🟣 ultra. An emoji badge aligns with the emoji model glyph beside it (partial-height block glyphs read as floating next to baseline-bound text). Claude Code's structured `effort.level` field is preferred; Codex effort is read from the model-with-reasoning display name (`gpt-5.6-sol xhigh`). Unset (`none`/`default`) or unknown effort hides the badge. Codex Fast mode adds `🚀` after the effort dial when the structured `service_tier` is `priority` or `fast`; payloads from older Codex versions fall back to an exact service-tier token in `model.display_name`. Other models and tiers remain unmarked.
-- Activity display is hook-owned: the `agent-statusline` plugin records `UserPromptSubmit` as `💬 MM/DD HH:MM` and `Stop` as `💤 MM/DD HH:MM` under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
+- Reasoning effort renders as an emoji dot dial after the model glyph, graded by compute burn: ⚫ minimal, ⚪ low, 🔵 medium, 🟡 high, 🟠 xhigh, 🔴 max, 🟣 ultra. An emoji badge aligns with the emoji model glyph beside it (partial-height block glyphs read as floating next to baseline-bound text). Claude Code's structured `effort.level` field is preferred, followed by Antigravity CLI's `model.effort`, then Codex's model-with-reasoning display name (`gpt-5.6-sol xhigh`). Unset (`none`/`default`) or unknown effort hides the badge. Codex Fast mode adds `🚀` after the effort dial when the structured `service_tier` is `priority` or `fast`; payloads from older Codex versions fall back to an exact service-tier token in `model.display_name`. Other models and tiers remain unmarked.
+- Activity display is hook-owned: the `agent-statusline` plugin records `UserPromptSubmit` (and Antigravity's `PreInvocation`) as `💬 MM/DD HH:MM` and `Stop` as `💤 MM/DD HH:MM` under `STATUSLINE_STATE_DIR`, `XDG_STATE_HOME/agent-statusline`, or `~/.local/state/agent-statusline`.
 
 See [`SPEC.md`](SPEC.md) for the full contract (requirements, invariants, segment rules).
 
@@ -186,6 +186,23 @@ into stale), `done` on `agent_settled`, and `--clear` on shutdown. The broker
 resolves from `SOX_ATTENTION_BIN` (absolute path only; the `sox` user CLI does
 not broker attention). Unset `SOX_ATTENTION_BIN` is a silent no-op, not
 misconfiguration. Debug via `SOX_ATTENTION_DEBUG=/abs/path.log`.
+
+## Use with Antigravity CLI (`agy`)
+
+Point `statusLine` in `~/.gemini/antigravity-cli/settings.json` at the renderer (or run `/statusline /absolute/path/to/statusline` inside `agy`):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/absolute/path/to/zig-out/bin/statusline"
+  }
+}
+```
+
+Antigravity CLI pipes its session JSON (`product: "antigravity"`, `model.{id,display_name,effort}`, `context_window.used_percentage`, `cycle_mode`, `cost.total_usd`) on stdin. The renderer trusts Antigravity's `used_percentage` verbatim without inheriting Claude Code's `autoCompactWindow` or reserve, renders `model.effort` on the effort dial, maps `cycle_mode` (`accept-edits`, `auto`, `plan`) onto the permission shield, and reads `cost.total_usd`.
+
+For prompt/idle (`💬`/`💤`) timestamps in `agy`, load `plugins/agent-statusline` (which ships `.antigravity-plugin/plugin.json` and a root `hooks.json` adapter over `SessionStart`, `PreInvocation`, and `Stop`) or wire `statusline activity-hook` into `~/.gemini/config/hooks.json`. Replay fixtures: `test/gemini-neon.json` and `test/gemini-carbon.json`.
 
 ## Use with Kimi Code
 

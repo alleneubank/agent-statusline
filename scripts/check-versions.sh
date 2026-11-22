@@ -92,6 +92,8 @@ check "plugins/agent-statusline/.claude-plugin/plugin.json" \
     "$(read_json_version "$ROOT/plugins/agent-statusline/.claude-plugin/plugin.json")"
 check "plugins/agent-statusline/.codex-plugin/plugin.json" \
     "$(read_json_version "$ROOT/plugins/agent-statusline/.codex-plugin/plugin.json")"
+check "plugins/agent-statusline/.antigravity-plugin/plugin.json" \
+    "$(read_json_version "$ROOT/plugins/agent-statusline/.antigravity-plugin/plugin.json")"
 check ".claude-plugin/marketplace.json" \
     "$(read_marketplace_version "$ROOT/.claude-plugin/marketplace.json")"
 

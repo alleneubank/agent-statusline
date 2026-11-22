@@ -1,0 +1,32 @@
+{
+  "product": "antigravity",
+  "agent_state": "idle",
+  "session_id": "test-gemini-carbon",
+  "conversation_id": "test-gemini-carbon",
+  "transcript_path": "/tmp/test.json",
+  "model": {
+    "id": "gemini-4-carbon-high",
+    "display_name": "Gemini 4 Carbon (High)",
+    "effort": "high"
+  },
+  "workspace": {
+    "current_dir": "/Users/allen/test",
+    "project_dir": "/Users/allen/test"
+  },
+  "context_window": {
+    "context_window_size": 1048576,
+    "used_percentage": 18.6,
+    "current_usage": {
+      "input_tokens": 170000,
+      "output_tokens": 5000,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 20000
+    }
+  },
+  "cycle_mode": "auto",
+  "cost": {
+    "total_usd": 0.4213,
+    "subagent_usd": 0,
+    "estimated": false
+  }
+}

@@ -137,12 +137,16 @@ const StatuslineInput = struct {
     model: ?struct {
         id: ?[]const u8 = null,
         display_name: ?[]const u8 = null,
+        // Antigravity CLI embeds the active reasoning tier inside `model`.
+        effort: ?[]const u8 = null,
     } = null,
     // Claude Code statusline schema: absent when the model has no effort
     // parameter; reflects live mid-session /effort changes.
     effort: ?struct {
         level: ?[]const u8 = null,
     } = null,
+    // Producer application identifier (e.g. `"antigravity"` from Antigravity CLI).
+    product: ?[]const u8 = null,
     // Codex's effective service tier. When present this is authoritative over
     // the legacy model-display-name token because it reflects live /fast
     // changes without requiring the model label to encode the tier.
@@ -161,6 +165,8 @@ const StatuslineInput = struct {
     context_window: ?ContextWindow = null,
     cost: ?struct {
         total_cost_usd: ?f64 = null,
+        // Antigravity CLI reports estimated session spend under `total_usd`.
+        total_usd: ?f64 = null,
         total_duration_ms: ?i64 = null,
         total_api_duration_ms: ?i64 = null,
         total_lines_added: ?i64 = null,
@@ -171,9 +177,17 @@ const StatuslineInput = struct {
     // stdin. Keep this as a compatibility fallback because Claude hook payloads
     // have carried it, and rendering it matches the Codex permission badge.
     permission_mode: ?[]const u8 = null,
+    // Antigravity CLI Shift+Tab execution mode (`accept-edits`, `auto`, `plan`;
+    // omitted in `default` mode).
+    cycle_mode: ?[]const u8 = null,
     approval_policy: ?[]const u8 = null,
     sandbox_policy: ?json.Value = null,
     permissions: ?PermissionsInput = null,
+
+    fn isAntigravity(self: StatuslineInput) bool {
+        const prod = self.product orelse return false;
+        return std.ascii.eqlIgnoreCase(prod, "antigravity");
+    }
 };
 
 /// Kimi Code statusline payload, as spawned by `status_line.command` in
@@ -276,8 +290,9 @@ const ModelType = enum {
     glm,
     // Alibaba Qwen family (Qwen 3.8 display names and ids).
     qwen,
-    // Google Gemini 4 Neon (display names and ids).
+    // Google Gemini 4 Neon and Carbon (display names and ids).
     gemini_neon,
+    gemini_carbon,
     unknown,
 
     /// Case-insensitive whole-token match. Model ids hyphenate tier tokens
@@ -362,10 +377,14 @@ const ModelType = enum {
         // no other producer embeds it. Must precede the Codex/GPT
         // fallbacks below.
         if (asciiContainsIgnoreCase(name, "qwen")) return .qwen;
-        // Google Gemini 4 Neon reports display names like "Gemini 4 Neon" /
-        // "Gemini 4 Neon (High)" and ids like "gemini-4-neon". Match both
-        // brand and whole tier token so other Gemini names stay unknown.
-        if (asciiContainsIgnoreCase(name, "gemini") and hasToken(name, "neon")) return .gemini_neon;
+        // Google Gemini 4 Neon and Carbon report display names like
+        // "Gemini 4 Neon" / "Gemini 4 Carbon (High)" and ids like
+        // "gemini-4-neon" / "gemini-4-carbon-high". Match both brand and
+        // whole tier token so other Gemini names stay unknown.
+        if (asciiContainsIgnoreCase(name, "gemini")) {
+            if (hasToken(name, "neon")) return .gemini_neon;
+            if (hasToken(name, "carbon")) return .gemini_carbon;
+        }
         if (asciiContainsIgnoreCase(name, "Codex")) return .codex;
         if (asciiContainsIgnoreCase(name, "GPT")) return .codex;
         return .unknown;
@@ -409,6 +428,7 @@ const ModelType = enum {
             .glm,
             .qwen,
             .gemini_neon,
+            .gemini_carbon,
             .unknown,
             => false,
         };
@@ -458,10 +478,13 @@ const ModelType = enum {
             // reading (❓) collided with the set's `?` unknown glyph and
             // read as an identity bug, so it was retired in 0.3.12.
             .qwen => "🐉",
-            // Gem stone: electric cyan crystal facet for Gemini 4 Neon —
-            // pairs Gemini's gem-bright name with Neon luminescence, distinct
-            // from every other glyph in the set.
-            .gemini_neon => "💎",
+            // Electric light bulb: gas-discharge lamp / neon sign glow for
+            // Gemini 4 Neon, distinct from every other glyph in the set.
+            .gemini_neon => "💡",
+            // Gem stone (diamond): crystalline carbon allotrope for Gemini 4
+            // Carbon — pairs Carbon's iconic crystal form with Gemini's
+            // gem-bright name.
+            .gemini_carbon => "💎",
             .unknown => "?",
         };
     }
@@ -524,9 +547,10 @@ const EffortLevel = enum {
     }
 };
 
-/// Structured `effort.level` (Claude Code) is authoritative when it parses;
-/// the display-name scan (Codex) is the fallback. Unknown labels fall through
-/// so the badge hides rather than guessing a tier color.
+/// Structured `effort.level` (Claude Code) is authoritative when it parses,
+/// followed by `model.effort` (Antigravity CLI), then the display-name scan
+/// (Codex). Unknown labels fall through so the badge hides rather than guessing
+/// a tier color.
 fn resolveEffort(input: StatuslineInput) ?EffortLevel {
     if (input.effort) |effort| {
         if (effort.level) |level| {
@@ -534,6 +558,9 @@ fn resolveEffort(input: StatuslineInput) ?EffortLevel {
         }
     }
     if (input.model) |model| {
+        if (model.effort) |level| {
+            if (EffortLevel.fromLabel(level)) |resolved| return resolved;
+        }
         if (model.display_name) |name| {
             if (EffortLevel.fromDisplayName(name)) |resolved| return resolved;
         }
@@ -1055,6 +1082,21 @@ fn contextUsageFromPayload(ctx: ContextWindow, ceiling: ContextCeiling) ?Context
     return null;
 }
 
+/// Antigravity CLI computes its own `used_percentage` against the active
+/// model's context window and omits `current_usage.total_tokens`. Trust its
+/// percentage verbatim so a host `~/.claude/settings.json` `autoCompactWindow`
+/// or Claude Code's 33k reserve never rescales an Antigravity session.
+fn antigravityContextUsage(ctx: ContextWindow) ContextUsage {
+    const total: u64 = if (ctx.current_usage) |cur| @intCast(cur.totalTokens()) else 0;
+    if (ctx.used_percentage) |pct| {
+        return .{
+            .percentage = @min(100.0, @max(0.0, pct)),
+            .total_tokens = total,
+        };
+    }
+    return .{ .percentage = 0.0, .total_tokens = total };
+}
+
 /// Calculate context usage percentage from API-provided values
 /// NOTE: This function is inaccurate - API values are cumulative session totals that
 /// don't reflect current context window position. Use calculateContextUsage() instead,
@@ -1190,11 +1232,11 @@ fn formatSessionDuration(input: StatuslineInput, writer: anytype) !bool {
     return true;
 }
 
-/// Format session cost from API-provided cost.total_cost_usd
+/// Format session cost from API-provided cost.total_cost_usd or cost.total_usd
 /// Rounds based on amount: <$1 shows 2 decimals, $1-10 shows 1 decimal, >=$10 rounds to whole
 fn formatCost(input: StatuslineInput, writer: anytype) !bool {
     const cost = input.cost orelse return false;
-    const usd = cost.total_cost_usd orelse return false;
+    const usd = cost.total_cost_usd orelse cost.total_usd orelse return false;
     if (usd < 0.001) return false; // Skip if negligible
 
     if (usd < 1.0) {
@@ -1370,8 +1412,13 @@ fn claudePermissionDisplay(mode: []const u8) PermissionDisplay {
     if (std.ascii.eqlIgnoreCase(mode, "bypassPermissions")) {
         return .{ .color = colors.red, .primary = "bypass" };
     }
-    if (std.ascii.eqlIgnoreCase(mode, "acceptEdits")) {
+    if (std.ascii.eqlIgnoreCase(mode, "acceptEdits") or
+        std.ascii.eqlIgnoreCase(mode, "accept-edits"))
+    {
         return .{ .color = colors.yellow, .primary = "edits" };
+    }
+    if (std.ascii.eqlIgnoreCase(mode, "auto")) {
+        return .{ .color = colors.yellow, .primary = "auto" };
     }
     if (std.ascii.eqlIgnoreCase(mode, "plan")) {
         return .{ .color = colors.green, .primary = "plan" };
@@ -1486,6 +1533,10 @@ fn permissionDisplay(input: StatuslineInput) ?PermissionDisplay {
         return claudePermissionDisplay(mode);
     }
 
+    if (input.cycle_mode) |mode| {
+        if (mode.len > 0) return claudePermissionDisplay(mode);
+    }
+
     return null;
 }
 
@@ -1528,9 +1579,13 @@ const ActivityState = struct {
 
 const ActivityHookInput = struct {
     session_id: ?[]const u8 = null,
+    // Antigravity CLI hook payloads use camelCase `conversationId`, matching
+    // the `session_id` / `conversation_id` emitted in its statusLine JSON.
+    conversationId: ?[]const u8 = null,
     turn_id: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
     hook_event_name: ?[]const u8 = null,
+    hookEventName: ?[]const u8 = null,
     model: ?[]const u8 = null,
 };
 
@@ -1683,6 +1738,9 @@ fn activityEventName(cli_arg: ?[]const u8, hook_input: ActivityHookInput) ?[]con
     if (hook_input.hook_event_name) |event| {
         if (event.len > 0) return event;
     }
+    if (hook_input.hookEventName) |event| {
+        if (event.len > 0) return event;
+    }
     return null;
 }
 
@@ -1700,7 +1758,7 @@ fn handleActivityHook(
     }) catch return;
     defer parsed.deinit();
 
-    const session_id = parsed.value.session_id orelse return;
+    const session_id = parsed.value.session_id orelse parsed.value.conversationId orelse return;
     if (session_id.len == 0) return;
     const path = activityStatePathForSessionId(allocator, dir, session_id) catch return;
     defer allocator.free(path);
@@ -1715,6 +1773,23 @@ fn handleActivityHook(
         writeActivityState(allocator, io, path, session_id, .{
             .state = .working,
             .last_prompt_at = now_seconds,
+            .idle_since = null,
+            .updated_at = now_seconds,
+        });
+        return;
+    }
+    if (std.mem.eql(u8, event, "PreInvocation")) {
+        // Antigravity fires PreInvocation before every model call in a turn,
+        // including tool-loop continuations. Keep the initial prompt timestamp
+        // while already working; only absent or idle state starts a new clock.
+        const previous = readActivityState(allocator, io, path);
+        const prompt_at = if (previous) |prev|
+            if (prev.state == .working and prev.last_prompt_at != null) prev.last_prompt_at.? else now_seconds
+        else
+            now_seconds;
+        writeActivityState(allocator, io, path, session_id, .{
+            .state = .working,
+            .last_prompt_at = prompt_at,
             .idle_since = null,
             .updated_at = now_seconds,
         });
@@ -2515,6 +2590,7 @@ pub fn main(init: std.process.Init) !void {
             // transcript scan below. A payload window must win over ~/.claude
             // settings: pi has no autoCompactWindow concept and must not
             // inherit Claude Code's numbers.
+            const is_agy = input.isAntigravity();
             const ceiling: ContextCeiling = .{
                 .auto_compact_enabled = if (input.auto_compact) |ac| ac.enabled else null,
                 .auto_compact_window = acw: {
@@ -2523,6 +2599,9 @@ pub fn main(init: std.process.Init) !void {
                             if (declared > 0) break :acw declared;
                         }
                     }
+                    // Antigravity CLI owns its own context accounting; never
+                    // read Claude Code's env or settings file for it.
+                    if (is_agy) break :acw null;
                     if (init.environ_map.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")) |raw| {
                         if (parseAutoCompactWindow(raw)) |configured| break :acw configured;
                     }
@@ -2540,6 +2619,9 @@ pub fn main(init: std.process.Init) !void {
 
             // Calculate context usage from producer-provided fields or fall back to transcript parsing.
             const usage: ContextUsage = blk: {
+                if (is_agy) {
+                    break :blk if (input.context_window) |ctx| antigravityContextUsage(ctx) else ContextUsage{ .percentage = 0.0 };
+                }
                 if (input.context_window) |ctx| {
                     if (contextUsageFromPayload(ctx, ceiling)) |from_payload| break :blk from_payload;
                 }
@@ -2576,11 +2658,12 @@ pub fn main(init: std.process.Init) !void {
             }
 
             // Cost
-            if (input.cost != null and input.cost.?.total_cost_usd != null) {
-                const cost_usd = input.cost.?.total_cost_usd.?;
-                if (cost_usd >= 0.001) {
-                    try writer.print(" {s}", .{colors.light_gray});
-                    _ = try formatCost(input, &writer);
+            if (input.cost) |cost_info| {
+                if (cost_info.total_cost_usd orelse cost_info.total_usd) |cost_usd| {
+                    if (cost_usd >= 0.001) {
+                        try writer.print(" {s}", .{colors.light_gray});
+                        _ = try formatCost(input, &writer);
+                    }
                 }
             }
 
@@ -2681,6 +2764,14 @@ test "ModelType detects models correctly" {
     try std.testing.expectEqual(ModelType.gemini_neon, ModelType.fromName("Gemini 4 Neon (High)"));
     try std.testing.expectEqual(ModelType.gemini_neon, ModelType.fromName("gemini-4-neon"));
     try std.testing.expectEqual(ModelType.gemini_neon, ModelType.fromName("google/gemini-4-neon"));
+    try std.testing.expectEqual(ModelType.gemini_carbon, ModelType.fromName("Gemini 4 Carbon"));
+    try std.testing.expectEqual(ModelType.gemini_carbon, ModelType.fromName("Gemini 4 Carbon (High)"));
+    try std.testing.expectEqual(ModelType.gemini_carbon, ModelType.fromName("gemini-4-carbon"));
+    try std.testing.expectEqual(ModelType.gemini_carbon, ModelType.fromName("gemini-4-carbon-high"));
+    try std.testing.expectEqual(ModelType.gemini_carbon, ModelType.fromName("google/gemini-4-carbon"));
+    try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("gemini-4-argon"));
+    try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("gemini-4-hydrocarbon"));
+    try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Orchestrator (Carbon)"));
     try std.testing.expectEqual(ModelType.unknown, ModelType.fromName("Mystery Model"));
 }
 
@@ -2734,7 +2825,8 @@ test "ModelType emoji representations" {
     try std.testing.expectEqualStrings("🐳", ModelType.deepseek_pro.emoji());
     try std.testing.expectEqualStrings("🐬", ModelType.deepseek_flash.emoji());
     try std.testing.expectEqualStrings("🐉", ModelType.qwen.emoji());
-    try std.testing.expectEqualStrings("💎", ModelType.gemini_neon.emoji());
+    try std.testing.expectEqualStrings("💡", ModelType.gemini_neon.emoji());
+    try std.testing.expectEqualStrings("💎", ModelType.gemini_carbon.emoji());
     try std.testing.expectEqualStrings("?", ModelType.unknown.emoji());
 }
 
@@ -2829,6 +2921,77 @@ test "resolveEffort prefers structured effort over display name" {
     const unsupported = StatuslineInput{ .model = .{ .display_name = "Opus" } };
     try std.testing.expect(resolveEffort(unsupported) == null);
     try std.testing.expect(resolveEffort(StatuslineInput{}) == null);
+
+    // Antigravity CLI embeds effort inside `model.effort` while wrapping the
+    // display-name label in parentheses ("Gemini 4 Carbon (High)").
+    const agy_model_effort = StatuslineInput{
+        .product = "antigravity",
+        .model = .{
+            .id = "gemini-4-carbon-high",
+            .display_name = "Gemini 4 Carbon (High)",
+            .effort = "high",
+        },
+    };
+    try std.testing.expectEqual(EffortLevel.high, resolveEffort(agy_model_effort).?);
+}
+
+test "Antigravity CLI payload fields trust producer percentage, cycle_mode, and total_usd" {
+    const allocator = std.testing.allocator;
+    const agy_json =
+        \\{
+        \\  "product": "antigravity",
+        \\  "session_id": "12345678-abcd-ef01-2345-6789abcdef01",
+        \\  "conversation_id": "12345678-abcd-ef01-2345-6789abcdef01",
+        \\  "model": {
+        \\    "id": "gemini-4-carbon-high",
+        \\    "display_name": "Gemini 4 Carbon (High)",
+        \\    "effort": "high"
+        \\  },
+        \\  "context_window": {
+        \\    "context_window_size": 1048576,
+        \\    "used_percentage": 18.6,
+        \\    "current_usage": {
+        \\      "input_tokens": 170000,
+        \\      "output_tokens": 5000,
+        \\      "cache_creation_input_tokens": 0,
+        \\      "cache_read_input_tokens": 20000
+        \\    }
+        \\  },
+        \\  "cycle_mode": "accept-edits",
+        \\  "cost": {
+        \\    "total_usd": 0.4213,
+        \\    "subagent_usd": 0,
+        \\    "estimated": false
+        \\  }
+        \\}
+    ;
+
+    const parsed = try json.parseFromSlice(StatuslineInput, allocator, agy_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.isAntigravity());
+    try std.testing.expectEqual(ModelType.gemini_carbon, ModelType.fromIdentity(
+        parsed.value.model.?.id,
+        parsed.value.model.?.display_name.?,
+    ));
+    try std.testing.expectEqual(EffortLevel.high, resolveEffort(parsed.value).?);
+
+    const usage = antigravityContextUsage(parsed.value.context_window.?);
+    try std.testing.expectApproxEqAbs(@as(f64, 18.6), usage.percentage, 0.001);
+    try std.testing.expectEqual(@as(u64, 195_000), usage.total_tokens);
+
+    var perm_buf: [64]u8 = undefined;
+    var perm_writer = std.Io.Writer.fixed(&perm_buf);
+    try std.testing.expect(try formatPermissionMode(&perm_writer, parsed.value));
+    try std.testing.expect(std.mem.indexOf(u8, perm_writer.buffered(), "🛡") != null);
+    try std.testing.expect(std.mem.indexOf(u8, perm_writer.buffered(), "edits") != null);
+
+    var cost_buf: [64]u8 = undefined;
+    var cost_writer = std.Io.Writer.fixed(&cost_buf);
+    try std.testing.expect(try formatCost(parsed.value, &cost_writer));
+    try std.testing.expectEqualStrings("$0.42", cost_writer.buffered());
 }
 
 test "EffortLevel meter dots heat up with effort" {
@@ -3895,10 +4058,13 @@ test "subagent rows show each task's resolved model with the main line's glyphs"
         \\  "tokenCount":83500,"tokenSamples":[1,2],"cwd":"/tmp"},
         \\ {"id":"a2","name":"reviewer","agentType":"code-reviewer","status":"running",
         \\  "description":"Review diff","label":"Review diff","startTime":2,
-        \\  "model":"claude-opus-5-5","tokenCount":0,"tokenSamples":[],"cwd":"/tmp"}
+        \\  "model":"claude-opus-5-5","tokenCount":0,"tokenSamples":[],"cwd":"/tmp"},
+        \\ {"id":"a3","name":"carbon","agentType":"general-purpose","status":"running",
+        \\  "description":"Check glyph","label":"Check glyph","startTime":3,
+        \\  "model":"gemini-4-carbon-high","effort":"high","tokenCount":0,"tokenSamples":[],"cwd":"/tmp"}
         \\]}
     );
-    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
 
     try std.testing.expectEqualStrings("a1", rows[0].id);
     try std.testing.expect(std.mem.indexOf(u8, rows[0].content, "🍃🟡 Explore") != null);
@@ -3911,6 +4077,10 @@ test "subagent rows show each task's resolved model with the main line's glyphs"
     try std.testing.expectEqualStrings("a2", rows[1].id);
     try std.testing.expect(std.mem.startsWith(u8, rows[1].content, "🎭 reviewer"));
     try std.testing.expect(std.mem.indexOf(u8, rows[1].content, "code-reviewer") == null);
+
+    // Gemini 4 Carbon renders its dedicated glyph and effort dial.
+    try std.testing.expectEqualStrings("a3", rows[2].id);
+    try std.testing.expect(std.mem.startsWith(u8, rows[2].content, "💎🟡 carbon"));
 }
 
 test "subagent rows hold a pending marker until the model resolves" {
@@ -4502,6 +4672,50 @@ test "activity hook lifecycle writes prompt, idle, and session-start states" {
 
     handleActivityHook(allocator, io, tmp_path, "SessionStart", "{\"session_id\":\"sid-lifecycle\"}", 30);
     try std.testing.expect(readActivityState(allocator, io, state_path) == null);
+
+    // Antigravity camelCase hook payloads (`conversationId`, `hookEventName`,
+    // `PreInvocation`) preserve the turn's initial prompt timestamp across
+    // multi-step tool invocations until `Stop` transitions to idle.
+    const agy_state_path = try activityStatePathForSessionId(allocator, tmp_path, "conv-agy-1");
+    defer allocator.free(agy_state_path);
+
+    handleActivityHook(
+        allocator,
+        io,
+        tmp_path,
+        null,
+        "{\"conversationId\":\"conv-agy-1\",\"hookEventName\":\"PreInvocation\",\"invocationNum\":1}",
+        100,
+    );
+    const agy_step1 = readActivityState(allocator, io, agy_state_path).?;
+    try std.testing.expectEqual(ActivityKind.working, agy_step1.state);
+    try std.testing.expectEqual(@as(?i64, 100), agy_step1.last_prompt_at);
+
+    handleActivityHook(
+        allocator,
+        io,
+        tmp_path,
+        "PreInvocation",
+        "{\"conversationId\":\"conv-agy-1\",\"hookEventName\":\"PreInvocation\",\"invocationNum\":2}",
+        125,
+    );
+    const agy_step2 = readActivityState(allocator, io, agy_state_path).?;
+    try std.testing.expectEqual(ActivityKind.working, agy_step2.state);
+    try std.testing.expectEqual(@as(?i64, 100), agy_step2.last_prompt_at);
+    try std.testing.expectEqual(@as(i64, 125), agy_step2.updated_at);
+
+    handleActivityHook(
+        allocator,
+        io,
+        tmp_path,
+        "Stop",
+        "{\"conversationId\":\"conv-agy-1\",\"hookEventName\":\"Stop\",\"terminationReason\":\"NO_TOOL_CALL\"}",
+        140,
+    );
+    const agy_idle = readActivityState(allocator, io, agy_state_path).?;
+    try std.testing.expectEqual(ActivityKind.idle, agy_idle.state);
+    try std.testing.expectEqual(@as(?i64, 100), agy_idle.last_prompt_at);
+    try std.testing.expectEqual(@as(?i64, 140), agy_idle.idle_since);
 }
 
 test "activityDisplay chooses prompt and idle timestamps" {

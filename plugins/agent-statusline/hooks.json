@@ -1,0 +1,25 @@
+{
+  "agent-statusline": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "./hooks/agy-activity-hook.sh SessionStart",
+        "timeout": 5
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "./hooks/agy-activity-hook.sh PreInvocation",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./hooks/agy-activity-hook.sh Stop",
+        "timeout": 5
+      }
+    ]
+  }
+}
